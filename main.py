@@ -28,6 +28,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     try:
+        await bot.tree.sync()
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} commands")
     except Exception as e:
