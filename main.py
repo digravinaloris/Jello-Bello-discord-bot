@@ -100,4 +100,5 @@ async def on_message_edit(before, after):
         await channel.send(f"✏️ **{before.author}** edited a message:\n**Before:** {before.content}\n**After:** {after.content}")
 
 keep_alive()
-bot.run("REDACTED")
+import os
+bot.run(os.getenv("TOKEN"))
