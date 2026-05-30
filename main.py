@@ -1,9 +1,10 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import flask
+import os
 from flask import Flask
 from threading import Thread
+import asyncio
 
 # Keep alive web server
 app = Flask('')
@@ -12,11 +13,12 @@ app = Flask('')
 def home():
     return "Bot is alive!"
 
-def run():
+def run_flask():
     app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
-    t = Thread(target=run)
+    t = Thread(target=run_flask)
+    t.daemon = True
     t.start()
 
 # Bot setup
@@ -93,16 +95,19 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_message_delete(message):
+    if message.guild is None or message.author.bot:
+        return
     channel = discord.utils.get(message.guild.text_channels, name="logs")
-    if channel and not message.author.bot:
+    if channel:
         await channel.send(f"🗑️ Message from **{message.author}** deleted: {message.content}")
 
 @bot.event
 async def on_message_edit(before, after):
+    if before.guild is None or before.author.bot:
+        return
     channel = discord.utils.get(before.guild.text_channels, name="logs")
-    if channel and not before.author.bot:
+    if channel:
         await channel.send(f"✏️ **{before.author}** edited a message:\n**Before:** {before.content}\n**After:** {after.content}")
 
 keep_alive()
-import os
 bot.run(os.getenv("TOKEN"))
