@@ -57,6 +57,24 @@ async def mute(interaction: discord.Interaction, member: discord.Member, minutes
     await member.timeout(duration, reason=reason)
     await interaction.response.send_message(f"✅ **{member}** has been muted for {minutes} minutes. Reason: {reason}")
 
+# /unmute
+@bot.tree.command(name="unmute", description="Remove timeout from a member")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def unmute(interaction: discord.Interaction, member: discord.Member):
+    await member.timeout(None)
+    await interaction.response.send_message(f"✅ **{member}** has been unmuted.")
+
+# /unban
+@bot.tree.command(name="unban", description="Unban a user by ID")
+@app_commands.checks.has_permissions(ban_members=True)
+async def unban(interaction: discord.Interaction, user_id: str):
+    try:
+        user = await bot.fetch_user(int(user_id))
+        await interaction.guild.unban(user)
+        await interaction.response.send_message(f"✅ **{user}** has been unbanned.")
+    except:
+        await interaction.response.send_message(f"❌ User not found or not banned.")
+
 # /warn
 warns = {}
 @bot.tree.command(name="warn", description="Warn a member")
