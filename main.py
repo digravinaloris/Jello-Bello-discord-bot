@@ -54,8 +54,11 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
     if member.top_role >= interaction.guild.me.top_role:
         await interaction.response.send_message("❌ I can't ban this member, their role is too high.")
         return
-    await member.ban(reason=reason)
-    await interaction.response.send_message(f"✅ **{member}** has been banned. Reason: {reason}")
+    try:
+        await member.ban(reason=reason)
+        await interaction.response.send_message(f"✅ **{member}** has been banned. Reason: {reason}")
+    except:
+        await interaction.response.send_message("❌ I can't ban this member.")
 
 # /kick
 @bot.tree.command(name="kick", description="Kick a member")
@@ -64,8 +67,11 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
     if member.top_role >= interaction.guild.me.top_role:
         await interaction.response.send_message("❌ I can't kick this member, their role is too high.")
         return
-    await member.kick(reason=reason)
-    await interaction.response.send_message(f"✅ **{member}** has been kicked. Reason: {reason}")
+    try:
+        await member.kick(reason=reason)
+        await interaction.response.send_message(f"✅ **{member}** has been kicked. Reason: {reason}")
+    except:
+        await interaction.response.send_message("❌ I can't kick this member.")
 
 # /mute
 @bot.tree.command(name="mute", description="Timeout a member")
@@ -74,9 +80,12 @@ async def mute(interaction: discord.Interaction, member: discord.Member, minutes
     if member.top_role >= interaction.guild.me.top_role:
         await interaction.response.send_message("❌ I can't mute this member, their role is too high.")
         return
-    duration = datetime.timedelta(minutes=minutes)
-    await member.timeout(duration, reason=reason)
-    await interaction.response.send_message(f"✅ **{member}** has been muted for {minutes} minutes. Reason: {reason}")
+    try:
+        duration = datetime.timedelta(minutes=minutes)
+        await member.timeout(duration, reason=reason)
+        await interaction.response.send_message(f"✅ **{member}** has been muted for {minutes} minutes. Reason: {reason}")
+    except:
+        await interaction.response.send_message("❌ I can't mute this member.")
 
 # /unmute
 @bot.tree.command(name="unmute", description="Remove timeout from a member")
