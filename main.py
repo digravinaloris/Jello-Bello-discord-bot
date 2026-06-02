@@ -5,6 +5,7 @@ import os
 from flask import Flask
 from threading import Thread
 import asyncio
+import datetime
 
 # Keep alive web server
 app = Flask('')
@@ -39,6 +40,9 @@ async def on_ready():
 @bot.tree.command(name="ban", description="Ban a member")
 @app_commands.checks.has_permissions(ban_members=True)
 async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+    if member.top_role >= interaction.guild.me.top_role:
+        await interaction.response.send_message("❌ I can't ban this member, their role is too high.", ephemeral=True)
+        return
     await member.ban(reason=reason)
     await interaction.response.send_message(f"✅ **{member}** has been banned. Reason: {reason}")
 
@@ -46,6 +50,9 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
 @bot.tree.command(name="kick", description="Kick a member")
 @app_commands.checks.has_permissions(kick_members=True)
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+    if member.top_role >= interaction.guild.me.top_role:
+        await interaction.response.send_message("❌ I can't kick this member, their role is too high.", ephemeral=True)
+        return
     await member.kick(reason=reason)
     await interaction.response.send_message(f"✅ **{member}** has been kicked. Reason: {reason}")
 
@@ -53,7 +60,9 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
 @bot.tree.command(name="mute", description="Timeout a member")
 @app_commands.checks.has_permissions(moderate_members=True)
 async def mute(interaction: discord.Interaction, member: discord.Member, minutes: int = 10, reason: str = "No reason provided"):
-    import datetime
+    if member.top_role >= interaction.guild.me.top_role:
+        await interaction.response.send_message("❌ I can't mute this member, their role is too high.", ephemeral=True)
+        return
     duration = datetime.timedelta(minutes=minutes)
     await member.timeout(duration, reason=reason)
     await interaction.response.send_message(f"✅ **{member}** has been muted for {minutes} minutes. Reason: {reason}")
@@ -62,6 +71,9 @@ async def mute(interaction: discord.Interaction, member: discord.Member, minutes
 @bot.tree.command(name="unmute", description="Remove timeout from a member")
 @app_commands.checks.has_permissions(moderate_members=True)
 async def unmute(interaction: discord.Interaction, member: discord.Member):
+    if member.top_role >= interaction.guild.me.top_role:
+        await interaction.response.send_message("❌ I can't unmute this member, their role is too high.", ephemeral=True)
+        return
     await member.timeout(None)
     await interaction.response.send_message(f"✅ **{member}** has been unmuted.")
 
@@ -74,7 +86,7 @@ async def unban(interaction: discord.Interaction, user_id: str):
         await interaction.guild.unban(user)
         await interaction.response.send_message(f"✅ **{user}** has been unbanned.")
     except:
-        await interaction.response.send_message(f"❌ User not found or not banned.")
+        await interaction.response.send_message("❌ User not found or not banned.", ephemeral=True)
 
 # /warn
 warns = {}
@@ -130,3 +142,4 @@ async def on_message_edit(before, after):
 
 keep_alive()
 bot.run(os.getenv("TOKEN"))
+    
