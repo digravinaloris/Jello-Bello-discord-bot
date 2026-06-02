@@ -26,7 +26,7 @@ def keep_alive():
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-ALLOWED_ROLES = {1471790588272836631, 1471790588272836630}
+ALLOWED_ROLES = {1471790588272836631, 1471790588272836630, 1511459295475142747}
 
 def has_allowed_role():
     async def predicate(interaction: discord.Interaction):
