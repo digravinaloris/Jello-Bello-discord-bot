@@ -41,7 +41,7 @@ async def on_ready():
 @app_commands.checks.has_permissions(ban_members=True)
 async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
     if member.top_role >= interaction.guild.me.top_role:
-        await interaction.response.send_message("❌ I can't ban this member, their role is too high.", ephemeral=True)
+        await interaction.response.send_message("❌ I can't ban this member, their role is too high.")
         return
     await member.ban(reason=reason)
     await interaction.response.send_message(f"✅ **{member}** has been banned. Reason: {reason}")
@@ -51,7 +51,7 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
 @app_commands.checks.has_permissions(kick_members=True)
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
     if member.top_role >= interaction.guild.me.top_role:
-        await interaction.response.send_message("❌ I can't kick this member, their role is too high.", ephemeral=True)
+        await interaction.response.send_message("❌ I can't kick this member, their role is too high.")
         return
     await member.kick(reason=reason)
     await interaction.response.send_message(f"✅ **{member}** has been kicked. Reason: {reason}")
@@ -61,7 +61,7 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
 @app_commands.checks.has_permissions(moderate_members=True)
 async def mute(interaction: discord.Interaction, member: discord.Member, minutes: int = 10, reason: str = "No reason provided"):
     if member.top_role >= interaction.guild.me.top_role:
-        await interaction.response.send_message("❌ I can't mute this member, their role is too high.", ephemeral=True)
+        await interaction.response.send_message("❌ I can't mute this member, their role is too high.")
         return
     duration = datetime.timedelta(minutes=minutes)
     await member.timeout(duration, reason=reason)
@@ -72,7 +72,7 @@ async def mute(interaction: discord.Interaction, member: discord.Member, minutes
 @app_commands.checks.has_permissions(moderate_members=True)
 async def unmute(interaction: discord.Interaction, member: discord.Member):
     if member.top_role >= interaction.guild.me.top_role:
-        await interaction.response.send_message("❌ I can't unmute this member, their role is too high.", ephemeral=True)
+        await interaction.response.send_message("❌ I can't unmute this member, their role is too high.")
         return
     await member.timeout(None)
     await interaction.response.send_message(f"✅ **{member}** has been unmuted.")
@@ -86,7 +86,7 @@ async def unban(interaction: discord.Interaction, user_id: str):
         await interaction.guild.unban(user)
         await interaction.response.send_message(f"✅ **{user}** has been unbanned.")
     except:
-        await interaction.response.send_message("❌ User not found or not banned.", ephemeral=True)
+        await interaction.response.send_message("❌ User not found or not banned.")
 
 # /warn
 warns = {}
@@ -109,7 +109,7 @@ async def warnings(interaction: discord.Interaction, member: discord.Member):
 @app_commands.checks.has_permissions(manage_messages=True)
 async def clear(interaction: discord.Interaction, amount: int = 10):
     await interaction.channel.purge(limit=amount)
-    await interaction.response.send_message(f"🗑️ Cleared {amount} messages.", ephemeral=True)
+    await interaction.response.send_message(f"🗑️ Cleared {amount} messages.")
 
 # Logs
 @bot.event
@@ -142,4 +142,3 @@ async def on_message_edit(before, after):
 
 keep_alive()
 bot.run(os.getenv("TOKEN"))
-    
