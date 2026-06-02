@@ -26,6 +26,17 @@ def keep_alive():
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+ALLOWED_ROLES = {1471790588272836631, 1471790588272836630}
+
+def has_allowed_role():
+    async def predicate(interaction: discord.Interaction):
+        user_roles = {role.id for role in interaction.user.roles}
+        if not user_roles & ALLOWED_ROLES:
+            await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+            return False
+        return True
+    return app_commands.check(predicate)
+
 @bot.event
 async def on_ready():
     try:
@@ -109,7 +120,33 @@ async def warnings(interaction: discord.Interaction, member: discord.Member):
 @app_commands.checks.has_permissions(manage_messages=True)
 async def clear(interaction: discord.Interaction, amount: int = 10):
     await interaction.channel.purge(limit=amount)
-    await interaction.response.send_message(f"🗑️ Cleared {amount} messages.")
+    await interaction.response.send_message(f"🗑️ Cleared {amount} messages.", ephemeral=True)
+
+# /roleadd
+@bot.tree.command(name="roleadd", description="Give a role to a member")
+@has_allowed_role()
+async def roleadd(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+    if role >= interaction.guild.me.top_role:
+        await interaction.response.send_message("❌ I can't give this role, it's too high.")
+        return
+    if role in member.roles:
+        await interaction.response.send_message(f"❌ **{member}** already has the role {role.mention}.")
+        return
+    await member.add_roles(role)
+    await interaction.response.send_message(f"✅ **{member}** has been given the role {role.mention}.")
+
+# /roleremove
+@bot.tree.command(name="roleremove", description="Remove a role from a member")
+@has_allowed_role()
+async def roleremove(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+    if role >= interaction.guild.me.top_role:
+        await interaction.response.send_message("❌ I can't remove this role, it's too high.")
+        return
+    if role not in member.roles:
+        await interaction.response.send_message(f"❌ **{member}** doesn't have the role {role.mention}.")
+        return
+    await member.remove_roles(role)
+    await interaction.response.send_message(f"✅ Removed the role {role.mention} from **{member}**.")
 
 # Logs
 @bot.event
@@ -142,3 +179,4 @@ async def on_message_edit(before, after):
 
 keep_alive()
 bot.run(os.getenv("TOKEN"))
+    
