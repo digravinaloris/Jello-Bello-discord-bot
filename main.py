@@ -128,8 +128,9 @@ async def warnings(interaction: discord.Interaction, member: discord.Member):
 @bot.tree.command(name="clear", description="Clear messages")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def clear(interaction: discord.Interaction, amount: int = 10):
-    await interaction.channel.purge(limit=amount)
-    await interaction.response.send_message(f"🗑️ Cleared {amount} messages.", ephemeral=True)
+    await interaction.response.send_message(f"🗑️ Clearing {amount} messages...")
+    await asyncio.sleep(5)
+    await interaction.channel.purge(limit=amount + 1)
 
 # /roleadd
 @bot.tree.command(name="roleadd", description="Give a role to a member")
