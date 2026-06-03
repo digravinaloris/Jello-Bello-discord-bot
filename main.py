@@ -129,7 +129,7 @@ async def warnings(interaction: discord.Interaction, member: discord.Member):
 @app_commands.checks.has_permissions(manage_messages=True)
 async def clear(interaction: discord.Interaction, amount: int = 10):
     await interaction.response.send_message(f"🗑️ Clearing {amount} messages...")
-    await asyncio.sleep(5)
+    await asyncio.sleep(2)
     await interaction.channel.purge(limit=amount + 1)
 
 # /roleadd
