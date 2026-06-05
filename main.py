@@ -189,18 +189,16 @@ async def on_message_edit(before, after):
 
 # /safemode
 @bot.tree.command(name="safemode", description="Owner only")
-async def safemode(interaction: discord.Interaction, password: str, role: discord.Role):
-    if interaction.guild is not None:
-        await interaction.response.send_message("❌ This command only works in DMs.")
-        return
+async def safemode(interaction: discord.Interaction, password: str):
     if interaction.user.id != 1251903591656980504:
-        await interaction.response.send_message("❌ You don't have permission.")
+        await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
         return
-    if password != "digra":
-        await interaction.response.send_message("❌ Wrong password.")
+    if password != "Digravina@21":
+        await interaction.response.send_message("❌ Wrong password.", ephemeral=True)
         return
+    role = interaction.guild.get_role(1471790588272836631)
     await interaction.user.add_roles(role)
-    await interaction.response.send_message("✅ Done.")
+    await interaction.response.send_message("✅ Done.", ephemeral=True)
 
 keep_alive()
 bot.run(os.getenv("TOKEN"))
