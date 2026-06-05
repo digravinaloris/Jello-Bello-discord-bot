@@ -273,5 +273,36 @@ async def on_message_edit(before, after):
         embed.add_field(name="After", value=after.content or "*(empty)*", inline=False)
         await channel.send(embed=embed)
 
+# /unwarn
+@bot.tree.command(name="unwarn", description="Remove a warning from a member")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def unwarn(interaction: discord.Interaction, member: discord.Member):
+    uid = str(member.id)
+    if warns.get(uid, 0) == 0:
+        embed = discord.Embed(description=f"❌ **{member}** has no warnings.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
+        return
+    warns[uid] -= 1
+    embed = discord.Embed(title="✅ Warning Removed", color=0xffcc00)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
+    embed.add_field(name="Remaining Warnings", value=f"{warns[uid]}", inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+# /mutelist
+@bot.tree.command(name="mutelist", description="List all muted members")
+async def mutelist(interaction: discord.Interaction):
+    muted = [m for m in interaction.guild.members if m.is_timed_out()]
+    if not muted:
+        embed = discord.Embed(description="✅ No members are currently muted.", color=0x00cc00)
+        await interaction.response.send_message(embed=embed)
+        return
+    embed = discord.Embed(title="🔇 Muted Members", color=0xff6600)
+    for m in muted:
+        until = m.timed_out_until.strftime("%Y-%m-%d %H:%M UTC")
+        embed.add_field(name=f"{m}", value=f"Until: {until}", inline=False)
+    await interaction.response.send_message(embed=embed)
+
 keep_alive()
 bot.run(os.getenv("TOKEN"))
