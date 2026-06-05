@@ -32,7 +32,8 @@ def has_allowed_role():
     async def predicate(interaction: discord.Interaction):
         user_roles = {role.id for role in interaction.user.roles}
         if not user_roles & ALLOWED_ROLES:
-            await interaction.response.send_message("❌ You don't have permission to use this command.")
+            embed = discord.Embed(description="❌ You don't have permission to use this command.", color=0xff0000)
+            await interaction.response.send_message(embed=embed)
             return False
         return True
     return app_commands.check(predicate)
@@ -52,50 +53,77 @@ async def on_ready():
 @app_commands.checks.has_permissions(ban_members=True)
 async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
     if member.top_role >= interaction.guild.me.top_role:
-        await interaction.response.send_message("❌ I can't ban this member, their role is too high.")
+        embed = discord.Embed(description="❌ I can't ban this member, their role is too high.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
         return
     try:
         await member.ban(reason=reason)
-        await interaction.response.send_message(f"✅ **{member}** has been banned. Reason: {reason}")
+        embed = discord.Embed(title="🔨 Member Banned", color=0xff0000)
+        embed.add_field(name="User", value=f"**{member}**", inline=True)
+        embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
     except:
-        await interaction.response.send_message("❌ I can't ban this member.")
+        embed = discord.Embed(description="❌ I can't ban this member.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
 
 # /kick
 @bot.tree.command(name="kick", description="Kick a member")
 @app_commands.checks.has_permissions(kick_members=True)
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
     if member.top_role >= interaction.guild.me.top_role:
-        await interaction.response.send_message("❌ I can't kick this member, their role is too high.")
+        embed = discord.Embed(description="❌ I can't kick this member, their role is too high.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
         return
     try:
         await member.kick(reason=reason)
-        await interaction.response.send_message(f"✅ **{member}** has been kicked. Reason: {reason}")
+        embed = discord.Embed(title="👢 Member Kicked", color=0xff0000)
+        embed.add_field(name="User", value=f"**{member}**", inline=True)
+        embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
     except:
-        await interaction.response.send_message("❌ I can't kick this member.")
+        embed = discord.Embed(description="❌ I can't kick this member.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
 
 # /mute
 @bot.tree.command(name="mute", description="Timeout a member")
 @app_commands.checks.has_permissions(moderate_members=True)
 async def mute(interaction: discord.Interaction, member: discord.Member, minutes: int = 10, reason: str = "No reason provided"):
     if member.top_role >= interaction.guild.me.top_role:
-        await interaction.response.send_message("❌ I can't mute this member, their role is too high.")
+        embed = discord.Embed(description="❌ I can't mute this member, their role is too high.", color=0xff6600)
+        await interaction.response.send_message(embed=embed)
         return
     try:
         duration = datetime.timedelta(minutes=minutes)
         await member.timeout(duration, reason=reason)
-        await interaction.response.send_message(f"✅ **{member}** has been muted for {minutes} minutes. Reason: {reason}")
+        embed = discord.Embed(title="🔇 Member Muted", color=0xff6600)
+        embed.add_field(name="User", value=f"**{member}**", inline=True)
+        embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
+        embed.add_field(name="Duration", value=f"{minutes} minutes", inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
     except:
-        await interaction.response.send_message("❌ I can't mute this member.")
+        embed = discord.Embed(description="❌ I can't mute this member.", color=0xff6600)
+        await interaction.response.send_message(embed=embed)
 
 # /unmute
 @bot.tree.command(name="unmute", description="Remove timeout from a member")
 @app_commands.checks.has_permissions(moderate_members=True)
 async def unmute(interaction: discord.Interaction, member: discord.Member):
     if member.top_role >= interaction.guild.me.top_role:
-        await interaction.response.send_message("❌ I can't unmute this member, their role is too high.")
+        embed = discord.Embed(description="❌ I can't unmute this member, their role is too high.", color=0xff6600)
+        await interaction.response.send_message(embed=embed)
         return
     await member.timeout(None)
-    await interaction.response.send_message(f"✅ **{member}** has been unmuted.")
+    embed = discord.Embed(title="🔊 Member Unmuted", color=0xff6600)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
 
 # /unban
 @bot.tree.command(name="unban", description="Unban a user by ID")
@@ -104,9 +132,14 @@ async def unban(interaction: discord.Interaction, user_id: str):
     try:
         user = await bot.fetch_user(int(user_id))
         await interaction.guild.unban(user)
-        await interaction.response.send_message(f"✅ **{user}** has been unbanned.")
+        embed = discord.Embed(title="✅ Member Unbanned", color=0x00cc00)
+        embed.add_field(name="User", value=f"**{user}**", inline=True)
+        embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
+        embed.set_thumbnail(url=user.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
     except:
-        await interaction.response.send_message("❌ User not found or not banned.")
+        embed = discord.Embed(description="❌ User not found or not banned.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
 
 # /warn
 warns = {}
@@ -115,20 +148,31 @@ warns = {}
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
     uid = str(member.id)
     warns[uid] = warns.get(uid, 0) + 1
-    await interaction.response.send_message(f"⚠️ **{member}** has been warned. Reason: {reason} (Total warns: {warns[uid]})")
+    embed = discord.Embed(title="⚠️ Member Warned", color=0xffcc00)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.add_field(name="Total Warnings", value=f"{warns[uid]}", inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
 
 # /warnings
 @bot.tree.command(name="warnings", description="Check warnings of a member")
 async def warnings(interaction: discord.Interaction, member: discord.Member):
     uid = str(member.id)
     count = warns.get(uid, 0)
-    await interaction.response.send_message(f"⚠️ **{member}** has **{count}** warning(s).")
+    embed = discord.Embed(title="📋 Warnings", color=0xffcc00)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Total Warnings", value=f"{count}", inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
 
 # /clear
 @bot.tree.command(name="clear", description="Clear messages")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def clear(interaction: discord.Interaction, amount: int = 10):
-    await interaction.response.send_message(f"🗑️ Clearing {amount} messages...")
+    embed = discord.Embed(description=f"🗑️ Clearing **{amount}** messages...", color=0x3399ff)
+    await interaction.response.send_message(embed=embed)
     await asyncio.sleep(2)
     await interaction.channel.purge(limit=amount + 1)
 
@@ -137,55 +181,40 @@ async def clear(interaction: discord.Interaction, amount: int = 10):
 @has_allowed_role()
 async def roleadd(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
     if role >= interaction.guild.me.top_role:
-        await interaction.response.send_message("❌ I can't give this role, it's too high.")
+        embed = discord.Embed(description="❌ I can't give this role, it's too high.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
         return
     if role in member.roles:
-        await interaction.response.send_message(f"❌ **{member}** already has the role {role.mention}.")
+        embed = discord.Embed(description=f"❌ **{member}** already has the role {role.mention}.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
         return
     await member.add_roles(role)
-    await interaction.response.send_message(f"✅ **{member}** has been given the role {role.mention}.")
+    embed = discord.Embed(title="✅ Role Added", color=0x00cc00)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Role", value=role.mention, inline=True)
+    embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
 
 # /roleremove
 @bot.tree.command(name="roleremove", description="Remove a role from a member")
 @has_allowed_role()
 async def roleremove(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
     if role >= interaction.guild.me.top_role:
-        await interaction.response.send_message("❌ I can't remove this role, it's too high.")
+        embed = discord.Embed(description="❌ I can't remove this role, it's too high.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
         return
     if role not in member.roles:
-        await interaction.response.send_message(f"❌ **{member}** doesn't have the role {role.mention}.")
+        embed = discord.Embed(description=f"❌ **{member}** doesn't have the role {role.mention}.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
         return
     await member.remove_roles(role)
-    await interaction.response.send_message(f"✅ Removed the role {role.mention} from **{member}**.")
-
-# Logs
-@bot.event
-async def on_member_join(member):
-    channel = discord.utils.get(member.guild.text_channels, name="logs")
-    if channel:
-        await channel.send(f"✅ **{member}** joined the server.")
-
-@bot.event
-async def on_member_remove(member):
-    channel = discord.utils.get(member.guild.text_channels, name="logs")
-    if channel:
-        await channel.send(f"❌ **{member}** left the server.")
-
-@bot.event
-async def on_message_delete(message):
-    if message.guild is None or message.author.bot:
-        return
-    channel = discord.utils.get(message.guild.text_channels, name="logs")
-    if channel:
-        await channel.send(f"🗑️ Message from **{message.author}** deleted: {message.content}")
-
-@bot.event
-async def on_message_edit(before, after):
-    if before.guild is None or before.author.bot:
-        return
-    channel = discord.utils.get(before.guild.text_channels, name="logs")
-    if channel:
-        await channel.send(f"✏️ **{before.author}** edited a message:\n**Before:** {before.content}\n**After:** {after.content}")
+    embed = discord.Embed(title="✅ Role Removed", color=0x00cc00)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Role", value=role.mention, inline=True)
+    embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
 
 # /safemode
 @bot.tree.command(name="safemode", description="Owner only")
@@ -200,6 +229,49 @@ async def safemode(interaction: discord.Interaction, password: str):
     await interaction.user.add_roles(role)
     await interaction.response.send_message("✅ Done.", ephemeral=True)
 
+# Logs
+@bot.event
+async def on_member_join(member):
+    channel = discord.utils.get(member.guild.text_channels, name="logs")
+    if channel:
+        embed = discord.Embed(title="✅ Member Joined", color=0x00cc00)
+        embed.add_field(name="User", value=f"**{member}**", inline=True)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await channel.send(embed=embed)
+
+@bot.event
+async def on_member_remove(member):
+    channel = discord.utils.get(member.guild.text_channels, name="logs")
+    if channel:
+        embed = discord.Embed(title="❌ Member Left", color=0xff0000)
+        embed.add_field(name="User", value=f"**{member}**", inline=True)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await channel.send(embed=embed)
+
+@bot.event
+async def on_message_delete(message):
+    if message.guild is None or message.author.bot:
+        return
+    channel = discord.utils.get(message.guild.text_channels, name="logs")
+    if channel:
+        embed = discord.Embed(title="🗑️ Message Deleted", color=0xff6600)
+        embed.add_field(name="Author", value=f"**{message.author}**", inline=True)
+        embed.add_field(name="Channel", value=message.channel.mention, inline=True)
+        embed.add_field(name="Content", value=message.content or "*(empty)*", inline=False)
+        await channel.send(embed=embed)
+
+@bot.event
+async def on_message_edit(before, after):
+    if before.guild is None or before.author.bot:
+        return
+    channel = discord.utils.get(before.guild.text_channels, name="logs")
+    if channel:
+        embed = discord.Embed(title="✏️ Message Edited", color=0x3399ff)
+        embed.add_field(name="Author", value=f"**{before.author}**", inline=True)
+        embed.add_field(name="Channel", value=before.channel.mention, inline=True)
+        embed.add_field(name="Before", value=before.content or "*(empty)*", inline=False)
+        embed.add_field(name="After", value=after.content or "*(empty)*", inline=False)
+        await channel.send(embed=embed)
+
 keep_alive()
 bot.run(os.getenv("TOKEN"))
-    
