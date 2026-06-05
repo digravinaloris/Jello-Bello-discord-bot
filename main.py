@@ -32,7 +32,7 @@ def has_allowed_role():
     async def predicate(interaction: discord.Interaction):
         user_roles = {role.id for role in interaction.user.roles}
         if not user_roles & ALLOWED_ROLES:
-            await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+            await interaction.response.send_message("❌ You don't have permission to use this command.")
             return False
         return True
     return app_commands.check(predicate)
