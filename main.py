@@ -269,6 +269,48 @@ async def roleremove(interaction: discord.Interaction, member: discord.Member, r
     embed.set_thumbnail(url=member.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
+# /lock
+@bot.tree.command(name="lock", description="Lock a channel")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def lock(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    channel = channel or interaction.channel
+    await channel.set_permissions(interaction.guild.default_role, send_messages=False)
+    embed = discord.Embed(title="🔒 Channel Locked", color=0xff0000)
+    embed.add_field(name="Channel", value=channel.mention, inline=True)
+    embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+# /unlock
+@bot.tree.command(name="unlock", description="Unlock a channel")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def unlock(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    channel = channel or interaction.channel
+    await channel.set_permissions(interaction.guild.default_role, send_messages=True)
+    embed = discord.Embed(title="🔓 Channel Unlocked", color=0x00cc00)
+    embed.add_field(name="Channel", value=channel.mention, inline=True)
+    embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+# /warnlist
+@bot.tree.command(name="warnlist", description="List all warned members")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def warnlist(interaction: discord.Interaction):
+    await interaction.response.defer()
+    docs = warns_col.find({"count": {"$gt": 0}})
+    warned = list(docs)
+    if not warned:
+        embed = discord.Embed(description="✅ No members have warnings.", color=0x00cc00)
+        await interaction.followup.send(embed=embed)
+        return
+    embed = discord.Embed(title="⚠️ Warned Members", color=0xffcc00)
+    for doc in warned:
+        try:
+            user = await bot.fetch_user(int(doc["user_id"]))
+            embed.add_field(name=f"{user}", value=f"{doc['count']} warning(s)", inline=False)
+        except:
+            embed.add_field(name=f"Unknown ({doc['user_id']})", value=f"{doc['count']} warning(s)", inline=False)
+    await interaction.followup.send(embed=embed)
+
 # /safemode
 @bot.tree.command(name="safemode", description="Owner only")
 async def safemode(interaction: discord.Interaction, password: str):
