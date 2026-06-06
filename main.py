@@ -6,6 +6,19 @@ from flask import Flask
 from threading import Thread
 import asyncio
 import datetime
+from pymongo import MongoClient
+
+# MongoDB setup
+mongo = MongoClient(os.getenv("MONGO_URI"))
+db = mongo["discordbot"]
+warns_col = db["warns"]
+
+def get_warns(user_id):
+    doc = warns_col.find_one({"user_id": str(user_id)})
+    return doc["count"] if doc else 0
+
+def set_warns(user_id, count):
+    warns_col.update_one({"user_id": str(user_id)}, {"$set": {"count": count}}, upsert=True)
 
 # Keep alive web server
 app = Flask('')
@@ -142,25 +155,41 @@ async def unban(interaction: discord.Interaction, user_id: str):
         await interaction.response.send_message(embed=embed)
 
 # /warn
-warns = {}
 @bot.tree.command(name="warn", description="Warn a member")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
-    uid = str(member.id)
-    warns[uid] = warns.get(uid, 0) + 1
+    count = get_warns(member.id) + 1
+    set_warns(member.id, count)
     embed = discord.Embed(title="⚠️ Member Warned", color=0xffcc00)
     embed.add_field(name="User", value=f"**{member}**", inline=True)
     embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
     embed.add_field(name="Reason", value=reason, inline=False)
-    embed.add_field(name="Total Warnings", value=f"{warns[uid]}", inline=True)
+    embed.add_field(name="Total Warnings", value=f"{count}", inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+# /unwarn
+@bot.tree.command(name="unwarn", description="Remove a warning from a member")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def unwarn(interaction: discord.Interaction, member: discord.Member):
+    count = get_warns(member.id)
+    if count == 0:
+        embed = discord.Embed(description=f"❌ **{member}** has no warnings.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
+        return
+    count -= 1
+    set_warns(member.id, count)
+    embed = discord.Embed(title="✅ Warning Removed", color=0xffcc00)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
+    embed.add_field(name="Remaining Warnings", value=f"{count}", inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
 # /warnings
 @bot.tree.command(name="warnings", description="Check warnings of a member")
 async def warnings(interaction: discord.Interaction, member: discord.Member):
-    uid = str(member.id)
-    count = warns.get(uid, 0)
+    count = get_warns(member.id)
     embed = discord.Embed(title="📋 Warnings", color=0xffcc00)
     embed.add_field(name="User", value=f"**{member}**", inline=True)
     embed.add_field(name="Total Warnings", value=f"{count}", inline=True)
@@ -175,6 +204,20 @@ async def clear(interaction: discord.Interaction, amount: int = 10):
     await interaction.response.send_message(embed=embed)
     await asyncio.sleep(2)
     await interaction.channel.purge(limit=amount + 1)
+
+# /mutelist
+@bot.tree.command(name="mutelist", description="List all muted members")
+async def mutelist(interaction: discord.Interaction):
+    muted = [m for m in interaction.guild.members if m.is_timed_out()]
+    if not muted:
+        embed = discord.Embed(description="✅ No members are currently muted.", color=0x00cc00)
+        await interaction.response.send_message(embed=embed)
+        return
+    embed = discord.Embed(title="🔇 Muted Members", color=0xff6600)
+    for m in muted:
+        until = m.timed_out_until.strftime("%Y-%m-%d %H:%M UTC")
+        embed.add_field(name=f"{m}", value=f"Until: {until}", inline=False)
+    await interaction.response.send_message(embed=embed)
 
 # /roleadd
 @bot.tree.command(name="roleadd", description="Give a role to a member")
@@ -272,37 +315,6 @@ async def on_message_edit(before, after):
         embed.add_field(name="Before", value=before.content or "*(empty)*", inline=False)
         embed.add_field(name="After", value=after.content or "*(empty)*", inline=False)
         await channel.send(embed=embed)
-
-# /unwarn
-@bot.tree.command(name="unwarn", description="Remove a warning from a member")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def unwarn(interaction: discord.Interaction, member: discord.Member):
-    uid = str(member.id)
-    if warns.get(uid, 0) == 0:
-        embed = discord.Embed(description=f"❌ **{member}** has no warnings.", color=0xff0000)
-        await interaction.response.send_message(embed=embed)
-        return
-    warns[uid] -= 1
-    embed = discord.Embed(title="✅ Warning Removed", color=0xffcc00)
-    embed.add_field(name="User", value=f"**{member}**", inline=True)
-    embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
-    embed.add_field(name="Remaining Warnings", value=f"{warns[uid]}", inline=True)
-    embed.set_thumbnail(url=member.display_avatar.url)
-    await interaction.response.send_message(embed=embed)
-
-# /mutelist
-@bot.tree.command(name="mutelist", description="List all muted members")
-async def mutelist(interaction: discord.Interaction):
-    muted = [m for m in interaction.guild.members if m.is_timed_out()]
-    if not muted:
-        embed = discord.Embed(description="✅ No members are currently muted.", color=0x00cc00)
-        await interaction.response.send_message(embed=embed)
-        return
-    embed = discord.Embed(title="🔇 Muted Members", color=0xff6600)
-    for m in muted:
-        until = m.timed_out_until.strftime("%Y-%m-%d %H:%M UTC")
-        embed.add_field(name=f"{m}", value=f"Until: {until}", inline=False)
-    await interaction.response.send_message(embed=embed)
 
 keep_alive()
 bot.run(os.getenv("TOKEN"))
