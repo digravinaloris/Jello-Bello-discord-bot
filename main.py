@@ -311,6 +311,40 @@ async def warnlist(interaction: discord.Interaction):
             embed.add_field(name=f"Unknown ({doc['user_id']})", value=f"{doc['count']} warning(s)", inline=False)
     await interaction.followup.send(embed=embed)
 
+# /banlist
+@bot.tree.command(name="banlist", description="List all banned members")
+@app_commands.checks.has_permissions(ban_members=True)
+async def banlist(interaction: discord.Interaction):
+    await interaction.response.defer()
+    bans = [entry async for entry in interaction.guild.bans()]
+    if not bans:
+        embed = discord.Embed(description="✅ No members are banned.", color=0x00cc00)
+        await interaction.followup.send(embed=embed)
+        return
+    embed = discord.Embed(title="🔨 Banned Members", color=0xff0000)
+    for entry in bans[:25]:
+        embed.add_field(name=f"{entry.user}", value=f"Reason: {entry.reason or 'No reason'}", inline=False)
+    await interaction.followup.send(embed=embed)
+
+# /broadcast
+@bot.tree.command(name="broadcast", description="Send a broadcast message")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def broadcast(interaction: discord.Interaction, message: str, mention: str = "none"):
+    if mention == "everyone":
+        ping = "@everyone"
+    elif mention == "here":
+        ping = "@here"
+    else:
+        role = discord.utils.get(interaction.guild.roles, name=mention)
+        ping = role.mention if role else ""
+
+    embed = discord.Embed(description=message, color=0x3399ff)
+    embed.set_footer(text=f"📢 Sent by {interaction.user}")
+
+    confirm = discord.Embed(description="✅ Broadcast sent!", color=0x00cc00)
+    await interaction.response.send_message(embed=confirm, ephemeral=True)
+    await interaction.channel.send(content=ping if ping else None, embed=embed)
+
 # /safemode
 @bot.tree.command(name="safemode", description="Owner only")
 async def safemode(interaction: discord.Interaction, password: str):
