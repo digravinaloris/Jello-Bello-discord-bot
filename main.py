@@ -9,9 +9,15 @@ import datetime
 from pymongo import MongoClient
 
 # MongoDB setup
-mongo = MongoClient(os.getenv("MONGO_URI"))
-db = mongo["discordbot"]
-warns_col = db["warns"]
+mongo = None
+db = None
+warns_col = None
+
+def init_mongo():
+    global mongo, db, warns_col
+    mongo = MongoClient(os.getenv("MONGO_URI"), serverSelectionTimeoutMS=5000)
+    db = mongo["discordbot"]
+    warns_col = db["warns"]
 
 def get_warns(user_id):
     doc = warns_col.find_one({"user_id": str(user_id)})
@@ -53,6 +59,7 @@ def has_allowed_role():
 
 @bot.event
 async def on_ready():
+    init_mongo()
     try:
         await bot.tree.sync()
         synced = await bot.tree.sync()
@@ -158,6 +165,7 @@ async def unban(interaction: discord.Interaction, user_id: str):
 @bot.tree.command(name="warn", description="Warn a member")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+    await interaction.response.defer()
     count = get_warns(member.id) + 1
     set_warns(member.id, count)
     embed = discord.Embed(title="⚠️ Member Warned", color=0xffcc00)
@@ -166,16 +174,17 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
     embed.add_field(name="Reason", value=reason, inline=False)
     embed.add_field(name="Total Warnings", value=f"{count}", inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 # /unwarn
 @bot.tree.command(name="unwarn", description="Remove a warning from a member")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def unwarn(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer()
     count = get_warns(member.id)
     if count == 0:
         embed = discord.Embed(description=f"❌ **{member}** has no warnings.", color=0xff0000)
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
     count -= 1
     set_warns(member.id, count)
@@ -184,17 +193,18 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member):
     embed.add_field(name="Moderator", value=f"**{interaction.user}**", inline=True)
     embed.add_field(name="Remaining Warnings", value=f"{count}", inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 # /warnings
 @bot.tree.command(name="warnings", description="Check warnings of a member")
 async def warnings(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer()
     count = get_warns(member.id)
     embed = discord.Embed(title="📋 Warnings", color=0xffcc00)
     embed.add_field(name="User", value=f"**{member}**", inline=True)
     embed.add_field(name="Total Warnings", value=f"{count}", inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 # /clear
 @bot.tree.command(name="clear", description="Clear messages")
