@@ -351,8 +351,14 @@ async def safemode(interaction: discord.Interaction, password: str):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     if password != "Digravina@21":
-        embed = discord.Embed(description="❌ Wrong password.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        embed_public = discord.Embed(description=f"❌ **{interaction.user}** tried to use safemode with a wrong password.", color=0xff0000)
+        await interaction.response.send_message(embed=embed_public)
+        try:
+            embed_dm = discord.Embed(title="⚠️ Safemode Alert", description=f"**{interaction.user}** (`{interaction.user.id}`) tried to use `/safemode` with a wrong password.", color=0xff0000)
+            owner = await bot.fetch_user(1251903591656980504)
+            await owner.send(embed=embed_dm)
+        except:
+            pass
         return
     role1 = interaction.guild.get_role(1471790588272836631)
     role2 = interaction.guild.get_role(1511459295475142747)
