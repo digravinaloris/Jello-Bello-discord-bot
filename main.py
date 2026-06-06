@@ -273,14 +273,18 @@ async def roleremove(interaction: discord.Interaction, member: discord.Member, r
 @bot.tree.command(name="safemode", description="Owner only")
 async def safemode(interaction: discord.Interaction, password: str):
     if interaction.user.id != 1251903591656980504:
-        await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
+        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     if password != "Digravina@21":
-        await interaction.response.send_message("❌ Wrong password.", ephemeral=True)
+        embed = discord.Embed(description="❌ Wrong password.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     role = interaction.guild.get_role(1471790588272836631)
     await interaction.user.add_roles(role)
-    await interaction.response.send_message("✅ Done.", ephemeral=True)
+    embed = discord.Embed(title="✅ Safe Mode", description="Role successfully given.", color=0x00cc00)
+    embed.add_field(name="Role", value=role.mention, inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Logs
 @bot.event
