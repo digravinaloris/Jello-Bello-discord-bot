@@ -80,7 +80,7 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
         await member.ban(reason=reason)
         embed = discord.Embed(title="🔨 Member Banned", color=0xff0000)
         embed.add_field(name="User", value=f"**{member}**", inline=True)
-        embed.add_field(name="Banned by", value=f"**{interaction.user.top_role.name}**", inline=True)
+        embed.add_field(name="Banned by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.set_thumbnail(url=member.display_avatar.url)
         await interaction.response.send_message(embed=embed)
@@ -100,7 +100,7 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
         await member.kick(reason=reason)
         embed = discord.Embed(title="👢 Member Kicked", color=0xff0000)
         embed.add_field(name="User", value=f"**{member}**", inline=True)
-        embed.add_field(name="Kicked by", value=f"**{interaction.user.top_role.name}**", inline=True)
+        embed.add_field(name="Kicked by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.set_thumbnail(url=member.display_avatar.url)
         await interaction.response.send_message(embed=embed)
@@ -121,7 +121,7 @@ async def mute(interaction: discord.Interaction, member: discord.Member, minutes
         await member.timeout(duration, reason=reason)
         embed = discord.Embed(title="🔇 Member Muted", color=0xff6600)
         embed.add_field(name="User", value=f"**{member}**", inline=True)
-        embed.add_field(name="Muted by", value=f"**{interaction.user.top_role.name}**", inline=True)
+        embed.add_field(name="Muted by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
         embed.add_field(name="Duration", value=f"{minutes} minutes", inline=True)
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.set_thumbnail(url=member.display_avatar.url)
@@ -141,7 +141,7 @@ async def unmute(interaction: discord.Interaction, member: discord.Member):
     await member.timeout(None)
     embed = discord.Embed(title="🔊 Member Unmuted", color=0xff6600)
     embed.add_field(name="User", value=f"**{member}**", inline=True)
-    embed.add_field(name="Unmuted by", value=f"**{interaction.user.top_role.name}**", inline=True)
+    embed.add_field(name="Unmuted by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
@@ -154,7 +154,7 @@ async def unban(interaction: discord.Interaction, user_id: str):
         await interaction.guild.unban(user)
         embed = discord.Embed(title="✅ Member Unbanned", color=0x00cc00)
         embed.add_field(name="User", value=f"**{user}**", inline=True)
-        embed.add_field(name="Unbanned by", value=f"**{interaction.user.top_role.name}**", inline=True)
+        embed.add_field(name="Unbanned by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
         embed.set_thumbnail(url=user.display_avatar.url)
         await interaction.response.send_message(embed=embed)
     except:
@@ -170,7 +170,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
     set_warns(member.id, count)
     embed = discord.Embed(title="⚠️ Member Warned", color=0xffcc00)
     embed.add_field(name="User", value=f"**{member}**", inline=True)
-    embed.add_field(name="Warned by", value=f"**{interaction.user.top_role.name}**", inline=True)
+    embed.add_field(name="Warned by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
     embed.add_field(name="Reason", value=reason, inline=False)
     embed.add_field(name="Total Warnings", value=f"{count}", inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
@@ -190,7 +190,7 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member):
     set_warns(member.id, count)
     embed = discord.Embed(title="✅ Warning Removed", color=0xffcc00)
     embed.add_field(name="User", value=f"**{member}**", inline=True)
-    embed.add_field(name="Unwarn by", value=f"**{interaction.user.top_role.name}**", inline=True)
+    embed.add_field(name="Unwarn by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
     embed.add_field(name="Remaining Warnings", value=f"{count}", inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
     await interaction.followup.send(embed=embed)
@@ -245,7 +245,7 @@ async def roleadd(interaction: discord.Interaction, member: discord.Member, role
     embed = discord.Embed(title="✅ Role Added", color=0x00cc00)
     embed.add_field(name="User", value=f"**{member}**", inline=True)
     embed.add_field(name="Role", value=role.mention, inline=True)
-    embed.add_field(name="Added by", value=f"**{interaction.user.top_role.name}**", inline=True)
+    embed.add_field(name="Added by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
@@ -265,7 +265,7 @@ async def roleremove(interaction: discord.Interaction, member: discord.Member, r
     embed = discord.Embed(title="✅ Role Removed", color=0x00cc00)
     embed.add_field(name="User", value=f"**{member}**", inline=True)
     embed.add_field(name="Role", value=role.mention, inline=True)
-    embed.add_field(name="Removed by", value=f"**{interaction.user.top_role.name}**", inline=True)
+    embed.add_field(name="Removed by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
@@ -277,7 +277,7 @@ async def lock(interaction: discord.Interaction, channel: discord.TextChannel = 
     await channel.set_permissions(interaction.guild.default_role, send_messages=False)
     embed = discord.Embed(title="🔒 Channel Locked", color=0xff0000)
     embed.add_field(name="Channel", value=channel.mention, inline=True)
-    embed.add_field(name="Locked by", value=f"**{interaction.user.top_role.name}**", inline=True)
+    embed.add_field(name="Locked by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
     await interaction.response.send_message(embed=embed)
 
 # /unlock
@@ -288,7 +288,7 @@ async def unlock(interaction: discord.Interaction, channel: discord.TextChannel 
     await channel.set_permissions(interaction.guild.default_role, send_messages=True)
     embed = discord.Embed(title="🔓 Channel Unlocked", color=0x00cc00)
     embed.add_field(name="Channel", value=channel.mention, inline=True)
-    embed.add_field(name="Unlocked by", value=f"**{interaction.user.top_role.name}**", inline=True)
+    embed.add_field(name="Unlocked by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
     await interaction.response.send_message(embed=embed)
 
 # /warnlist
