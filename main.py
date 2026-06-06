@@ -365,6 +365,11 @@ async def safemode(interaction: discord.Interaction, password: str):
 # Logs
 @bot.event
 async def on_member_join(member):
+    # Auto role
+    role = member.guild.get_role(ID_DU_ROLE)
+    if role:
+        await member.add_roles(role)
+    # Logs
     channel = discord.utils.get(member.guild.text_channels, name="logs")
     if channel:
         embed = discord.Embed(title="✅ Member Joined", color=0x00cc00)
