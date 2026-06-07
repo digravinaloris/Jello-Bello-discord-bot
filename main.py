@@ -64,8 +64,8 @@ def has_allowed_role():
 
 async def check_locked(interaction: discord.Interaction):
     if bot.locked and interaction.user.id != 1251903591656980504:
-        embed = discord.Embed(description="🔒 Bot is currently locked.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        embed = discord.Embed(description=f"🔒 Bot is currently locked by the owner.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
         return False
     return True
 
