@@ -389,6 +389,12 @@ class SafeModeView(discord.ui.View):
         embed = discord.Embed(title="🔒 Bot Locked", description="Bot is now locked for everyone except the owner.", color=0xff0000)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@discord.ui.button(label="🔓 Unlock Bot", style=discord.ButtonStyle.green)
+async def unlock_bot(self, interaction: discord.Interaction, button: discord.ui.Button):
+    bot.locked = False
+    embed = discord.Embed(title="🔓 Bot Unlocked", description="Bot is now unlocked for everyone.", color=0x00cc00)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 @bot.tree.command(name="safemode", description="Owner only")
 async def safemode(interaction: discord.Interaction, password: str):
     if interaction.user.id != 1251903591656980504:
