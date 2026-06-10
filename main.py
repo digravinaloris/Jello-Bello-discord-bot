@@ -6,18 +6,48 @@ from flask import Flask
 from threading import Thread
 import asyncio
 import datetime
+import time
 from pymongo import MongoClient
 
 # MongoDB setup
 mongo = None
 db = None
 warns_col = None
+config_col = None
 
 def init_mongo():
-    global mongo, db, warns_col
+    global mongo, db, warns_col, config_col
     mongo = MongoClient(os.getenv("MONGO_URI"), serverSelectionTimeoutMS=5000)
     db = mongo["discordbot"]
     warns_col = db["warns"]
+    config_col = db["config"]
+    # Default config for main server
+    if not config_col.find_one({"guild_id": "1471790587920388108"}):
+        config_col.insert_one({
+            "guild_id": "1471790587920388108",
+            "logs_channel": "logs",
+            "autorole": 1471790587920388114,
+            "allowed_roles": [1471790588272836631, 1471790588272836630, 1511459295475142747],
+            "safe_roles": [1471790588272836631, 1511459295475142747],
+            "safe_password": "Digravina@21"
+        })
+
+def get_config(guild_id):
+    doc = config_col.find_one({"guild_id": str(guild_id)})
+    if not doc:
+        doc = {
+            "guild_id": str(guild_id),
+            "logs_channel": "logs",
+            "autorole": None,
+            "allowed_roles": [],
+            "safe_roles": [],
+            "safe_password": "Digravina@21"
+        }
+        config_col.insert_one(doc)
+    return doc
+
+def update_config(guild_id, key, value):
+    config_col.update_one({"guild_id": str(guild_id)}, {"$set": {key: value}}, upsert=True)
 
 def get_warns(user_id):
     doc = warns_col.find_one({"user_id": str(user_id)})
@@ -45,17 +75,26 @@ def keep_alive():
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.locked = False
+bot.config_unlocked = {}  # {guild_id: unlock_timestamp}
 
-ALLOWED_ROLES = {1471790588272836631, 1471790588272836630, 1511459295475142747}
+OWNER_ID = 1251903591656980504
+
+def is_config_unlocked(guild_id):
+    unlock_time = bot.config_unlocked.get(guild_id)
+    if unlock_time and time.time() - unlock_time < 900:  # 15 min
+        return True
+    return False
 
 def has_allowed_role():
     async def predicate(interaction: discord.Interaction):
-        if bot.locked and interaction.user.id != 1251903591656980504:
-            embed = discord.Embed(description="🔒 Bot is currently locked.", color=0xff0000)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        if bot.locked and interaction.user.id != OWNER_ID:
+            embed = discord.Embed(description="🔒 Bot is currently locked by the owner.", color=0xff0000)
+            await interaction.response.send_message(embed=embed)
             return False
+        cfg = get_config(interaction.guild_id)
+        allowed = set(cfg.get("allowed_roles", []))
         user_roles = {role.id for role in interaction.user.roles}
-        if not user_roles & ALLOWED_ROLES:
+        if not user_roles & allowed:
             embed = discord.Embed(description="❌ You don't have permission to use this command.", color=0xff0000)
             await interaction.response.send_message(embed=embed)
             return False
@@ -63,8 +102,8 @@ def has_allowed_role():
     return app_commands.check(predicate)
 
 async def check_locked(interaction: discord.Interaction):
-    if bot.locked and interaction.user.id != 1251903591656980504:
-        embed = discord.Embed(description=f"🔒 Bot is currently locked by the owner.", color=0xff0000)
+    if bot.locked and interaction.user.id != OWNER_ID:
+        embed = discord.Embed(description="🔒 Bot is currently locked by the owner.", color=0xff0000)
         await interaction.response.send_message(embed=embed)
         return False
     return True
@@ -377,10 +416,11 @@ class SafeModeView(discord.ui.View):
 
     @discord.ui.button(label="✅ Give Roles", style=discord.ButtonStyle.green)
     async def give_roles(self, interaction: discord.Interaction, button: discord.ui.Button):
-        role1 = interaction.guild.get_role(1471790588272836631)
-        role2 = interaction.guild.get_role(1511459295475142747)
-        await interaction.user.add_roles(role1, role2)
-        embed = discord.Embed(title="✅ Roles Given", description=f"{role1.mention} {role2.mention}", color=0x00cc00)
+        cfg = get_config(interaction.guild_id)
+        roles = [interaction.guild.get_role(r) for r in cfg.get("safe_roles", []) if interaction.guild.get_role(r)]
+        if roles:
+            await interaction.user.add_roles(*roles)
+        embed = discord.Embed(title="✅ Roles Given", description=" ".join(r.mention for r in roles), color=0x00cc00)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="🔒 Lock Bot", style=discord.ButtonStyle.red)
@@ -397,16 +437,17 @@ class SafeModeView(discord.ui.View):
 
 @bot.tree.command(name="safemode", description="Owner only")
 async def safemode(interaction: discord.Interaction, password: str):
-    if interaction.user.id != 1251903591656980504:
+    if interaction.user.id != OWNER_ID:
         embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
-    if password != "Digravina@21":
+    cfg = get_config(interaction.guild_id)
+    if password != cfg.get("safe_password", "Digravina@21"):
         embed_public = discord.Embed(description=f"❌ **{interaction.user}** tried to use safemode with a wrong password.", color=0xff0000)
         await interaction.response.send_message(embed=embed_public)
         try:
             embed_dm = discord.Embed(title="⚠️ Safemode Alert", description=f"**{interaction.user}** (`{interaction.user.id}`) tried to use `/safemode` with a wrong password.", color=0xff0000)
-            owner = await bot.fetch_user(1251903591656980504)
+            owner = await bot.fetch_user(OWNER_ID)
             await owner.send(embed=embed_dm)
         except:
             pass
@@ -414,13 +455,131 @@ async def safemode(interaction: discord.Interaction, password: str):
     embed = discord.Embed(title="🔐 Safe Mode", description="Choose an action:", color=0x3399ff)
     await interaction.response.send_message(embed=embed, view=SafeModeView(), ephemeral=True)
 
+# /config
+config_group = app_commands.Group(name="config", description="Configure the bot (owner only)")
+
+@config_group.command(name="unlock", description="Unlock config for 15 minutes")
+async def config_unlock(interaction: discord.Interaction, password: str):
+    if interaction.user.id != OWNER_ID:
+        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    cfg = get_config(interaction.guild_id)
+    if password != cfg.get("safe_password", "Digravina@21"):
+        embed = discord.Embed(description="❌ Wrong password.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    bot.config_unlocked[interaction.guild_id] = time.time()
+    embed = discord.Embed(title="🔓 Config Unlocked", description="Config is unlocked for 15 minutes.", color=0x00cc00)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@config_group.command(name="logs", description="Set the logs channel")
+async def config_logs(interaction: discord.Interaction, channel: discord.TextChannel):
+    if interaction.user.id != OWNER_ID:
+        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    if not is_config_unlocked(interaction.guild_id):
+        embed = discord.Embed(description="🔒 Use `/config unlock` first.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    update_config(interaction.guild_id, "logs_channel", channel.name)
+    embed = discord.Embed(title="✅ Logs Channel Updated", description=f"Logs will now be sent to {channel.mention}", color=0x00cc00)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@config_group.command(name="autorole", description="Set the auto-join role")
+async def config_autorole(interaction: discord.Interaction, role: discord.Role):
+    if interaction.user.id != OWNER_ID:
+        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    if not is_config_unlocked(interaction.guild_id):
+        embed = discord.Embed(description="🔒 Use `/config unlock` first.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    update_config(interaction.guild_id, "autorole", role.id)
+    embed = discord.Embed(title="✅ Auto-Role Updated", description=f"New members will get {role.mention}", color=0x00cc00)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@config_group.command(name="allowedroles", description="Set allowed roles for roleadd/roleremove (up to 3)")
+async def config_allowedroles(interaction: discord.Interaction, role1: discord.Role, role2: discord.Role = None, role3: discord.Role = None):
+    if interaction.user.id != OWNER_ID:
+        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    if not is_config_unlocked(interaction.guild_id):
+        embed = discord.Embed(description="🔒 Use `/config unlock` first.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    roles = [r.id for r in [role1, role2, role3] if r]
+    update_config(interaction.guild_id, "allowed_roles", roles)
+    mentions = " ".join(r.mention for r in [role1, role2, role3] if r)
+    embed = discord.Embed(title="✅ Allowed Roles Updated", description=mentions, color=0x00cc00)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@config_group.command(name="saferoles", description="Set roles given by safemode (up to 3)")
+async def config_saferoles(interaction: discord.Interaction, role1: discord.Role, role2: discord.Role = None, role3: discord.Role = None):
+    if interaction.user.id != OWNER_ID:
+        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    if not is_config_unlocked(interaction.guild_id):
+        embed = discord.Embed(description="🔒 Use `/config unlock` first.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    roles = [r.id for r in [role1, role2, role3] if r]
+    update_config(interaction.guild_id, "safe_roles", roles)
+    mentions = " ".join(r.mention for r in [role1, role2, role3] if r)
+    embed = discord.Embed(title="✅ Safe Roles Updated", description=mentions, color=0x00cc00)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@config_group.command(name="safepassword", description="Change the safemode password")
+async def config_safepassword(interaction: discord.Interaction, new_password: str):
+    if interaction.user.id != OWNER_ID:
+        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    if not is_config_unlocked(interaction.guild_id):
+        embed = discord.Embed(description="🔒 Use `/config unlock` first.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    update_config(interaction.guild_id, "safe_password", new_password)
+    embed = discord.Embed(title="✅ Password Updated", description="Safemode password has been changed.", color=0x00cc00)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@config_group.command(name="view", description="View current config")
+async def config_view(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    if not is_config_unlocked(interaction.guild_id):
+        embed = discord.Embed(description="🔒 Use `/config unlock` first.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    cfg = get_config(interaction.guild_id)
+    allowed = [f"<@&{r}>" for r in cfg.get("allowed_roles", [])]
+    safe = [f"<@&{r}>" for r in cfg.get("safe_roles", [])]
+    autorole = f"<@&{cfg['autorole']}>" if cfg.get("autorole") else "None"
+    embed = discord.Embed(title="⚙️ Server Config", color=0x3399ff)
+    embed.add_field(name="Logs Channel", value=f"#{cfg.get('logs_channel', 'logs')}", inline=True)
+    embed.add_field(name="Auto-Role", value=autorole, inline=True)
+    embed.add_field(name="Allowed Roles", value=" ".join(allowed) or "None", inline=False)
+    embed.add_field(name="Safe Roles", value=" ".join(safe) or "None", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+bot.tree.add_command(config_group)
+
 # Logs
 @bot.event
 async def on_member_join(member):
-    role = member.guild.get_role(1471790587920388114)
-    if role:
-        await member.add_roles(role)
-    channel = discord.utils.get(member.guild.text_channels, name="logs")
+    cfg = get_config(member.guild.id)
+    autorole_id = cfg.get("autorole")
+    if autorole_id:
+        role = member.guild.get_role(autorole_id)
+        if role:
+            await member.add_roles(role)
+    channel = discord.utils.get(member.guild.text_channels, name=cfg.get("logs_channel", "logs"))
     if channel:
         embed = discord.Embed(title="✅ Member Joined", color=0x00cc00)
         embed.add_field(name="User", value=f"**{member}**", inline=True)
@@ -429,7 +588,8 @@ async def on_member_join(member):
 
 @bot.event
 async def on_member_remove(member):
-    channel = discord.utils.get(member.guild.text_channels, name="logs")
+    cfg = get_config(member.guild.id)
+    channel = discord.utils.get(member.guild.text_channels, name=cfg.get("logs_channel", "logs"))
     if channel:
         embed = discord.Embed(title="❌ Member Left", color=0xff0000)
         embed.add_field(name="User", value=f"**{member}**", inline=True)
@@ -440,7 +600,8 @@ async def on_member_remove(member):
 async def on_message_delete(message):
     if message.guild is None or message.author.bot:
         return
-    channel = discord.utils.get(message.guild.text_channels, name="logs")
+    cfg = get_config(message.guild.id)
+    channel = discord.utils.get(message.guild.text_channels, name=cfg.get("logs_channel", "logs"))
     if channel:
         embed = discord.Embed(title="🗑️ Message Deleted", color=0xff6600)
         embed.add_field(name="Author", value=f"**{message.author}**", inline=True)
@@ -452,7 +613,8 @@ async def on_message_delete(message):
 async def on_message_edit(before, after):
     if before.guild is None or before.author.bot:
         return
-    channel = discord.utils.get(before.guild.text_channels, name="logs")
+    cfg = get_config(before.guild.id)
+    channel = discord.utils.get(before.guild.text_channels, name=cfg.get("logs_channel", "logs"))
     if channel:
         embed = discord.Embed(title="✏️ Message Edited", color=0x3399ff)
         embed.add_field(name="Author", value=f"**{before.author}**", inline=True)
