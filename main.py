@@ -473,6 +473,21 @@ async def config_unlock(interaction: discord.Interaction, password: str):
     embed = discord.Embed(title="🔓 Config Unlocked", description="Config is unlocked for 15 minutes.", color=0x00cc00)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# /invite
+@bot.tree.command(name="invite", description="Get server invite link", dm_permission=True)
+async def invite(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    guild = bot.get_guild(1471790587920388108)
+    channel = guild.text_channels[0]
+    invite_link = await channel.create_invite(max_age=3600, max_uses=1)
+    embed = discord.Embed(title="🔗 Server Invite", description=f"[Click here]({invite_link})", color=0x3399ff)
+    embed.add_field(name="Expires", value="1 hour", inline=True)
+    embed.add_field(name="Max uses", value="1", inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 @config_group.command(name="logs", description="Set the logs channel")
 async def config_logs(interaction: discord.Interaction, channel: discord.TextChannel):
     if interaction.user.id != OWNER_ID:
