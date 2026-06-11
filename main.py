@@ -222,6 +222,10 @@ async def unban(interaction: discord.Interaction, user_id: str):
 @app_commands.checks.has_permissions(manage_messages=True)
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
     if not await check_locked(interaction): return
+    if member.top_role >= interaction.guild.me.top_role:
+        embed = discord.Embed(description="❌ I can't warn this member, their role is too high.", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
+        return
     await interaction.response.defer()
     count = get_warns(member.id) + 1
     set_warns(member.id, count)
@@ -471,21 +475,6 @@ async def config_unlock(interaction: discord.Interaction, password: str):
         return
     bot.config_unlocked[interaction.guild_id] = time.time()
     embed = discord.Embed(title="🔓 Config Unlocked", description="Config is unlocked for 15 minutes.", color=0x00cc00)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# /invite
-@bot.tree.command(name="invite", description="Get server invite link", dm_permission=True)
-async def invite(interaction: discord.Interaction):
-    if interaction.user.id != OWNER_ID:
-        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    guild = bot.get_guild(1471790587920388108)
-    channel = guild.text_channels[0]
-    invite_link = await channel.create_invite(max_age=3600, max_uses=1)
-    embed = discord.Embed(title="🔗 Server Invite", description=f"[Click here]({invite_link})", color=0x3399ff)
-    embed.add_field(name="Expires", value="1 hour", inline=True)
-    embed.add_field(name="Max uses", value="1", inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @config_group.command(name="logs", description="Set the logs channel")
