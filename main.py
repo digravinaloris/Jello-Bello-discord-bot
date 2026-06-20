@@ -872,6 +872,114 @@ def list_roles_route(guild_id):
     roles = [{"id": str(r.id), "name": r.name} for r in guild.roles if not r.is_default()]
     return jsonify(roles)
 
+@api.route('/api/guilds/<guild_id>/members', methods=['GET'])
+@require_api_key
+def list_members_route(guild_id):
+    if not bot.is_ready():
+        return jsonify({"error": "Bot not ready"}), 503
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({"error": "Guild not found"}), 404
+    members = [
+        {
+            "id": str(m.id),
+            "name": m.display_name,
+            "username": str(m),
+            "avatar_url": m.display_avatar.url,
+            "is_muted": m.is_timed_out()
+        }
+        for m in guild.members if not m.bot
+    ]
+    return jsonify(members)
+
+@api.route('/api/guilds/<guild_id>/members/<user_id>/mute', methods=['POST'])
+@require_api_key
+def mute_member_route(guild_id, user_id):
+    if not bot.is_ready():
+        return jsonify({"error": "Bot not ready"}), 503
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({"error": "Guild not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    minutes = int(data.get("minutes", 10))
+    reason = data.get("reason") or "Muted by mobile app"
+
+    async def _mute():
+        member = guild.get_member(int(user_id))
+        if not member:
+            return False, "Member not found"
+        if member.top_role >= guild.me.top_role:
+            return False, "Role too high"
+        duration = datetime.timedelta(minutes=minutes)
+        await member.timeout(duration, reason=reason)
+        return True, None
+
+    try:
+        success, error = run_coroutine(_mute())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if not success:
+        return jsonify({"error": error}), 400
+    return jsonify({"success": True})
+
+@api.route('/api/guilds/<guild_id>/members/<user_id>/unmute', methods=['POST'])
+@require_api_key
+def unmute_member_route(guild_id, user_id):
+    if not bot.is_ready():
+        return jsonify({"error": "Bot not ready"}), 503
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({"error": "Guild not found"}), 404
+
+    async def _unmute():
+        member = guild.get_member(int(user_id))
+        if not member:
+            return False, "Member not found"
+        await member.timeout(None)
+        return True, None
+
+    try:
+        success, error = run_coroutine(_unmute())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if not success:
+        return jsonify({"error": error}), 400
+    return jsonify({"success": True})
+
+@api.route('/api/guilds/<guild_id>/members/<user_id>/warn', methods=['POST'])
+@require_api_key
+def warn_member_route(guild_id, user_id):
+    if not bot.is_ready():
+        return jsonify({"error": "Bot not ready"}), 503
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({"error": "Guild not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    reason = data.get("reason") or "Warned by mobile app"
+
+    member = guild.get_member(int(user_id))
+    if not member:
+        return jsonify({"error": "Member not found"}), 404
+
+    count = get_warns(user_id) + 1
+    set_warns(user_id, count)
+
+    return jsonify({"success": True, "warnings": count, "reason": reason})
+
+@api.route('/api/guilds/<guild_id>/members/<user_id>/unwarn', methods=['POST'])
+@require_api_key
+def unwarn_member_route(guild_id, user_id):
+    count = get_warns(user_id)
+    if count == 0:
+        return jsonify({"error": "No warnings to remove"}), 400
+    count -= 1
+    set_warns(user_id, count)
+    return jsonify({"success": True, "warnings": count})
+
 
 def run_api():
     port = int(os.getenv("PORT", 8080))
