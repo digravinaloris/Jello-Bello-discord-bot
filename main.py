@@ -2,12 +2,13 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import os
-from flask import Flask
+from flask import Flask, request, jsonify
 from threading import Thread
 import asyncio
 import datetime
 import time
 from pymongo import MongoClient
+from functools import wraps
 
 # MongoDB setup
 mongo = None
@@ -56,28 +57,15 @@ def get_warns(user_id):
 def set_warns(user_id, count):
     warns_col.update_one({"user_id": str(user_id)}, {"$set": {"count": count}}, upsert=True)
 
-# Keep alive web server
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot is alive!"
-
-def run_flask():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run_flask)
-    t.daemon = True
-    t.start()
-
 # Bot setup
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.locked = False
 bot.config_unlocked = {}  # {guild_id: unlock_timestamp}
+bot.ready_event = None  # set in on_ready, used so Flask waits until bot is ready
 
 OWNER_ID = 1251903591656980504
+API_KEY = os.getenv("API_KEY")  # clé secrète pour protéger l'API, à définir sur Render
 
 def is_config_unlocked(guild_id):
     unlock_time = bot.config_unlocked.get(guild_id)
@@ -626,6 +614,273 @@ async def on_message_edit(before, after):
         embed.add_field(name="Before", value=before.content or "*(empty)*", inline=False)
         embed.add_field(name="After", value=after.content or "*(empty)*", inline=False)
         await channel.send(embed=embed)
+
+
+# ============================================================
+# ===================  API REST (App Android) =================
+# ============================================================
+
+api = Flask('')
+
+def require_api_key(f):
+    """Décorateur : vérifie le header X-API-Key sur chaque requête protégée."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not API_KEY:
+            return jsonify({"error": "API_KEY not configured on server"}), 500
+        key = request.headers.get("X-API-Key")
+        if key != API_KEY:
+            return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return wrapper
+
+def run_coroutine(coro, timeout=10):
+    """
+    Exécute une coroutine discord.py depuis un thread Flask (sync),
+    en la poussant dans l'event loop du bot, et attend le résultat.
+    """
+    future = asyncio.run_coroutine_threadsafe(coro, bot.loop)
+    return future.result(timeout=timeout)
+
+@api.route('/')
+def home():
+    return "Bot is alive!"
+
+@api.route('/api/health', methods=['GET'])
+@require_api_key
+def health():
+    return jsonify({
+        "online": bot.is_ready(),
+        "locked": bot.locked,
+        "guild_count": len(bot.guilds) if bot.is_ready() else 0
+    })
+
+@api.route('/api/guilds', methods=['GET'])
+@require_api_key
+def list_guilds():
+    if not bot.is_ready():
+        return jsonify({"error": "Bot not ready"}), 503
+    guilds = [{"id": str(g.id), "name": g.name, "member_count": g.member_count} for g in bot.guilds]
+    return jsonify(guilds)
+
+@api.route('/api/guilds/<guild_id>/stats', methods=['GET'])
+@require_api_key
+def guild_stats(guild_id):
+    if not bot.is_ready():
+        return jsonify({"error": "Bot not ready"}), 503
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({"error": "Guild not found"}), 404
+
+    async def _stats():
+        bans = [b async for b in guild.bans()]
+        muted = [m for m in guild.members if m.is_timed_out()]
+        return len(bans), len(muted)
+
+    try:
+        ban_count, muted_count = run_coroutine(_stats())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    warned_count = warns_col.count_documents({"count": {"$gt": 0}})
+
+    return jsonify({
+        "guild_id": str(guild.id),
+        "name": guild.name,
+        "member_count": guild.member_count,
+        "ban_count": ban_count,
+        "muted_count": muted_count,
+        "warned_count": warned_count,
+        "locked": bot.locked
+    })
+
+@api.route('/api/guilds/<guild_id>/config', methods=['GET'])
+@require_api_key
+def get_guild_config(guild_id):
+    cfg = get_config(guild_id)
+    cfg.pop("_id", None)
+    cfg.pop("safe_password", None)  # on ne renvoie jamais le mdp en clair
+    return jsonify(cfg)
+
+@api.route('/api/guilds/<guild_id>/config', methods=['POST'])
+@require_api_key
+def update_guild_config(guild_id):
+    if not bot.is_ready():
+        return jsonify({"error": "Bot not ready"}), 503
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({"error": "Guild not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    allowed_keys = {"logs_channel", "autorole", "allowed_roles", "safe_roles", "safe_password"}
+    updated = {}
+    for key, value in data.items():
+        if key in allowed_keys:
+            update_config(guild_id, key, value)
+            updated[key] = value
+
+    if not updated:
+        return jsonify({"error": "No valid fields provided"}), 400
+    return jsonify({"success": True, "updated": updated})
+
+@api.route('/api/guilds/<guild_id>/lock', methods=['POST'])
+@require_api_key
+def lock_bot_route(guild_id):
+    bot.locked = True
+    return jsonify({"success": True, "locked": True})
+
+@api.route('/api/guilds/<guild_id>/unlock', methods=['POST'])
+@require_api_key
+def unlock_bot_route(guild_id):
+    bot.locked = False
+    return jsonify({"success": True, "locked": False})
+
+@api.route('/api/guilds/<guild_id>/broadcast', methods=['POST'])
+@require_api_key
+def broadcast_route(guild_id):
+    if not bot.is_ready():
+        return jsonify({"error": "Bot not ready"}), 503
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({"error": "Guild not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    message = data.get("message")
+    channel_id = data.get("channel_id")
+    mention = data.get("mention", "none")
+
+    if not message or not channel_id:
+        return jsonify({"error": "message and channel_id are required"}), 400
+
+    channel = guild.get_channel(int(channel_id))
+    if not channel:
+        return jsonify({"error": "Channel not found"}), 404
+
+    if mention == "everyone":
+        ping = "@everyone"
+    elif mention == "here":
+        ping = "@here"
+    else:
+        role = discord.utils.get(guild.roles, name=mention)
+        ping = role.mention if role else None
+
+    embed = discord.Embed(description=message, color=0x3399ff)
+    embed.set_footer(text="📢 Sent from the mobile app")
+
+    async def _send():
+        await channel.send(content=ping, embed=embed)
+
+    try:
+        run_coroutine(_send())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"success": True})
+
+@api.route('/api/guilds/<guild_id>/members/<user_id>/ban', methods=['POST'])
+@require_api_key
+def ban_member_route(guild_id, user_id):
+    if not bot.is_ready():
+        return jsonify({"error": "Bot not ready"}), 503
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({"error": "Guild not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    reason = data.get("reason", "Banned via mobile app")
+
+    async def _ban():
+        member = guild.get_member(int(user_id))
+        if not member:
+            return False, "Member not found"
+        if member.top_role >= guild.me.top_role:
+            return False, "Role too high"
+        await member.ban(reason=reason)
+        return True, None
+
+    try:
+        success, error = run_coroutine(_ban())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if not success:
+        return jsonify({"error": error}), 400
+    return jsonify({"success": True})
+
+@api.route('/api/guilds/<guild_id>/members/<user_id>/kick', methods=['POST'])
+@require_api_key
+def kick_member_route(guild_id, user_id):
+    if not bot.is_ready():
+        return jsonify({"error": "Bot not ready"}), 503
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({"error": "Guild not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    reason = data.get("reason", "Kicked via mobile app")
+
+    async def _kick():
+        member = guild.get_member(int(user_id))
+        if not member:
+            return False, "Member not found"
+        if member.top_role >= guild.me.top_role:
+            return False, "Role too high"
+        await member.kick(reason=reason)
+        return True, None
+
+    try:
+        success, error = run_coroutine(_kick())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if not success:
+        return jsonify({"error": error}), 400
+    return jsonify({"success": True})
+
+@api.route('/api/guilds/<guild_id>/members/<user_id>/warnings', methods=['GET'])
+@require_api_key
+def get_warnings_route(guild_id, user_id):
+    count = get_warns(user_id)
+    return jsonify({"user_id": user_id, "warnings": count})
+
+@api.route('/api/guilds/<guild_id>/warnlist', methods=['GET'])
+@require_api_key
+def warnlist_route(guild_id):
+    docs = list(warns_col.find({"count": {"$gt": 0}}))
+    result = [{"user_id": d["user_id"], "count": d["count"]} for d in docs]
+    return jsonify(result)
+
+@api.route('/api/guilds/<guild_id>/channels', methods=['GET'])
+@require_api_key
+def list_channels_route(guild_id):
+    if not bot.is_ready():
+        return jsonify({"error": "Bot not ready"}), 503
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({"error": "Guild not found"}), 404
+    channels = [{"id": str(c.id), "name": c.name} for c in guild.text_channels]
+    return jsonify(channels)
+
+@api.route('/api/guilds/<guild_id>/roles', methods=['GET'])
+@require_api_key
+def list_roles_route(guild_id):
+    if not bot.is_ready():
+        return jsonify({"error": "Bot not ready"}), 503
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({"error": "Guild not found"}), 404
+    roles = [{"id": str(r.id), "name": r.name} for r in guild.roles if not r.is_default()]
+    return jsonify(roles)
+
+
+def run_api():
+    port = int(os.getenv("PORT", 8080))
+    api.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_api)
+    t.daemon = True
+    t.start()
 
 keep_alive()
 bot.run(os.getenv("TOKEN"))
