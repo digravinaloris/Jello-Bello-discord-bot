@@ -642,6 +642,63 @@ def run_coroutine(coro, timeout=10):
     future = asyncio.run_coroutine_threadsafe(coro, bot.loop)
     return future.result(timeout=timeout)
 
+MOBILE_APP_LOG_CHANNEL_ID = 1471790589694578914
+
+async def _send_log_embed(guild, embed):
+    """Envoie un embed dans le channel fixe dédié aux logs de l'app mobile."""
+    channel = guild.get_channel(MOBILE_APP_LOG_CHANNEL_ID)
+    if channel:
+        await channel.send(embed=embed)
+
+def log_ban(guild, member, reason):
+    embed = discord.Embed(title="🔨 Member Banned", color=0xff0000)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Banned by", value="📱 mobile app", inline=True)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    return _send_log_embed(guild, embed)
+
+def log_kick(guild, member, reason):
+    embed = discord.Embed(title="👢 Member Kicked", color=0xff0000)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Kicked by", value="📱 mobile app", inline=True)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    return _send_log_embed(guild, embed)
+
+def log_mute(guild, member, minutes, reason):
+    embed = discord.Embed(title="🔇 Member Muted", color=0xff6600)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Muted by", value="📱 mobile app", inline=True)
+    embed.add_field(name="Duration", value=f"{minutes} minutes", inline=True)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    return _send_log_embed(guild, embed)
+
+def log_unmute(guild, member):
+    embed = discord.Embed(title="🔊 Member Unmuted", color=0xff6600)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Unmuted by", value="📱 mobile app", inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    return _send_log_embed(guild, embed)
+
+def log_warn(guild, member, reason, count):
+    embed = discord.Embed(title="⚠️ Member Warned", color=0xffcc00)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Warned by", value="📱 mobile app", inline=True)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.add_field(name="Total Warnings", value=f"{count}", inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    return _send_log_embed(guild, embed)
+
+def log_unwarn(guild, member, count):
+    embed = discord.Embed(title="✅ Warning Removed", color=0xffcc00)
+    embed.add_field(name="User", value=f"**{member}**", inline=True)
+    embed.add_field(name="Unwarn by", value="📱 mobile app", inline=True)
+    embed.add_field(name="Remaining Warnings", value=f"{count}", inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    return _send_log_embed(guild, embed)
+
 @api.route('/')
 def home():
     return "Bot is alive!"
@@ -796,6 +853,7 @@ def ban_member_route(guild_id, user_id):
         if member.top_role >= guild.me.top_role:
             return False, "Role too high"
         await member.ban(reason=reason)
+        await log_ban(guild, member, reason)
         return True, None
 
     try:
@@ -826,6 +884,7 @@ def kick_member_route(guild_id, user_id):
         if member.top_role >= guild.me.top_role:
             return False, "Role too high"
         await member.kick(reason=reason)
+        await log_kick(guild, member, reason)
         return True, None
 
     try:
@@ -913,6 +972,7 @@ def mute_member_route(guild_id, user_id):
             return False, "Role too high"
         duration = datetime.timedelta(minutes=minutes)
         await member.timeout(duration, reason=reason)
+        await log_mute(guild, member, minutes, reason)
         return True, None
 
     try:
@@ -938,6 +998,7 @@ def unmute_member_route(guild_id, user_id):
         if not member:
             return False, "Member not found"
         await member.timeout(None)
+        await log_unmute(guild, member)
         return True, None
 
     try:
@@ -968,6 +1029,11 @@ def warn_member_route(guild_id, user_id):
     count = get_warns(user_id) + 1
     set_warns(user_id, count)
 
+    try:
+        run_coroutine(log_warn(guild, member, reason, count))
+    except Exception:
+        pass  # le warn est déjà enregistré, le log est secondaire
+
     return jsonify({"success": True, "warnings": count, "reason": reason})
 
 @api.route('/api/guilds/<guild_id>/members/<user_id>/unwarn', methods=['POST'])
@@ -978,6 +1044,17 @@ def unwarn_member_route(guild_id, user_id):
         return jsonify({"error": "No warnings to remove"}), 400
     count -= 1
     set_warns(user_id, count)
+
+    if bot.is_ready():
+        guild = bot.get_guild(int(guild_id))
+        if guild:
+            member = guild.get_member(int(user_id))
+            if member:
+                try:
+                    run_coroutine(log_unwarn(guild, member, count))
+                except Exception:
+                    pass
+
     return jsonify({"success": True, "warnings": count})
 
 
