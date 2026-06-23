@@ -694,16 +694,13 @@ async def play_next(guild_id):
         state.voice_client.play(source, after=after_play)
 
 
-@bot.tree.command(name="play", description="Play a song from YouTube, Spotify or SoundCloud")
-async def play(interaction: discord.Interaction, query: str):
-    if not await check_locked(interaction):
-        return
+async def ensure_voice_connected(interaction: discord.Interaction):
+    """Connecte (ou déplace) le bot dans le salon vocal de l'utilisateur. Retourne le GuildMusicState, ou None si erreur déjà gérée."""
     if interaction.user.voice is None or interaction.user.voice.channel is None:
         embed = discord.Embed(description="❌ You need to be in a voice channel.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return None
 
-    await interaction.response.defer()
     state = get_music_state(interaction.guild_id)
     voice_channel = interaction.user.voice.channel
 
@@ -712,14 +709,11 @@ async def play(interaction: discord.Interaction, query: str):
     elif state.voice_client.channel != voice_channel:
         await state.voice_client.move_to(voice_channel)
 
-    try:
-        track = await resolve_query(query, interaction.user)
-    except Exception as e:
-        embed = discord.Embed(description=f"❌ Couldn't find or load that track.", color=0xff0000)
-        await interaction.followup.send(embed=embed)
-        print(f"resolve_query error: {e}")
-        return
+    return state
 
+
+async def queue_and_play(interaction: discord.Interaction, state: "GuildMusicState", track: "Track"):
+    """Ajoute un track déjà résolu à la queue et lance la lecture si rien ne joue."""
     state.queue.append(track)
 
     if state.voice_client.is_playing() or state.voice_client.is_paused():
@@ -735,6 +729,156 @@ async def play(interaction: discord.Interaction, query: str):
         embed.add_field(name="Requested by", value=track.requester.mention, inline=True)
         await interaction.followup.send(embed=embed)
         await play_next(interaction.guild_id)
+
+
+_autocomplete_cache = {}  # {query_lowercase: (timestamp, [entries])}
+AUTOCOMPLETE_CACHE_TTL = 300  # 5 minutes
+
+
+async def play_autocomplete(interaction: discord.Interaction, current: str):
+    """
+    Callback d'autocomplete pour /play : propose des titres en live pendant la frappe.
+    Discord impose ~3s de timeout et spamme une requête par frappe, donc on cache les résultats
+    et on attend un minimum de caractères avant de chercher, comme FlaviBot.
+    """
+    current = current.strip()
+    if len(current) < 2 or current.startswith("http"):
+        return []
+
+    cache_key = current.lower()
+    cached = _autocomplete_cache.get(cache_key)
+    now = time.time()
+    if cached and now - cached[0] < AUTOCOMPLETE_CACHE_TTL:
+        entries = cached[1]
+    else:
+        try:
+            entries = await search_youtube(current, max_results=8)
+        except Exception as e:
+            print(f"autocomplete search error: {e}")
+            return []
+        _autocomplete_cache[cache_key] = (now, entries)
+
+    choices = []
+    for entry in entries[:8]:
+        title = entry.get("title", "Unknown")
+        duration = format_duration(entry.get("duration"))
+        label = f"{title} · {duration}"[:100]
+        video_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id')}"
+        choices.append(app_commands.Choice(name=label, value=video_url))
+    return choices
+
+
+@bot.tree.command(name="play", description="Play a song from YouTube, Spotify or SoundCloud")
+@app_commands.autocomplete(query=play_autocomplete)
+async def play(interaction: discord.Interaction, query: str):
+    if not await check_locked(interaction):
+        return
+
+    await interaction.response.defer()
+    state = await ensure_voice_connected(interaction)
+    if state is None:
+        return
+
+    try:
+        track = await resolve_query(query, interaction.user)
+    except Exception as e:
+        embed = discord.Embed(description="❌ Couldn't find or load that track.", color=0xff0000)
+        await interaction.followup.send(embed=embed)
+        print(f"resolve_query error: {e}")
+        return
+
+    await queue_and_play(interaction, state, track)
+
+
+async def search_youtube(query, max_results=5):
+    """Renvoie une liste de résultats (titre, durée, url) depuis une recherche YouTube, sans télécharger l'audio."""
+    loop = asyncio.get_event_loop()
+    search_opts = dict(YTDL_OPTIONS)
+    search_opts["extract_flat"] = True  # juste les métadonnées, pas l'URL de stream complète (plus rapide)
+
+    def extract():
+        with yt_dlp.YoutubeDL(search_opts) as ytdl_search:
+            info = ytdl_search.extract_info(f"ytsearch{max_results}:{query}", download=False)
+            return info.get("entries", [])
+
+    return await loop.run_in_executor(None, extract)
+
+
+class SearchResultSelect(discord.ui.Select):
+    def __init__(self, results, requester):
+        self.results = results
+        self.requester = requester
+        options = []
+        for i, entry in enumerate(results):
+            title = entry.get("title", "Unknown")[:90]
+            duration = format_duration(entry.get("duration"))
+            options.append(discord.SelectOption(label=f"{i + 1}. {title}", description=duration, value=str(i)))
+        super().__init__(placeholder="Choose a track to play...", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        chosen = self.results[int(self.values[0])]
+        video_url = chosen.get("url") or f"https://www.youtube.com/watch?v={chosen.get('id')}"
+
+        state = await ensure_voice_connected(interaction)
+        if state is None:
+            return
+
+        try:
+            track = await resolve_query(video_url, self.requester)
+        except Exception as e:
+            embed = discord.Embed(description="❌ Couldn't load that track.", color=0xff0000)
+            await interaction.followup.send(embed=embed)
+            print(f"resolve_query error (search select): {e}")
+            return
+
+        await queue_and_play(interaction, state, track)
+
+        # Désactive le menu une fois un choix fait, pour éviter les doubles lectures
+        self.disabled = True
+        try:
+            await interaction.message.edit(view=self.view)
+        except Exception:
+            pass
+
+
+class SearchResultView(discord.ui.View):
+    def __init__(self, results, requester):
+        super().__init__(timeout=60)
+        self.add_item(SearchResultSelect(results, requester))
+
+
+@bot.tree.command(name="search", description="Search for a song and choose from a list of results")
+async def search(interaction: discord.Interaction, query: str):
+    if not await check_locked(interaction):
+        return
+
+    await interaction.response.defer()
+
+    try:
+        results = await search_youtube(query, max_results=5)
+    except Exception as e:
+        embed = discord.Embed(description="❌ Search failed, try again.", color=0xff0000)
+        await interaction.followup.send(embed=embed)
+        print(f"search_youtube error: {e}")
+        return
+
+    if not results:
+        embed = discord.Embed(description="❌ No results found.", color=0xff0000)
+        await interaction.followup.send(embed=embed)
+        return
+
+    embed = discord.Embed(title=f"🔎 Search results for \"{query}\"", color=0x3399ff)
+    lines = []
+    for i, entry in enumerate(results):
+        title = entry.get("title", "Unknown")
+        duration = format_duration(entry.get("duration"))
+        lines.append(f"**{i + 1}.** {title} · {duration}")
+    embed.description = "\n".join(lines)
+    embed.set_footer(text="Select a track from the menu below")
+
+    view = SearchResultView(results, interaction.user)
+    await interaction.followup.send(embed=embed, view=view)
 
 
 @bot.tree.command(name="pause", description="Pause the current song")
