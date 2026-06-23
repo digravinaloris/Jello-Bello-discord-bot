@@ -1,4 +1,6 @@
-discord.py
+discord.py[voice]
 flask
 pymongo
 dnspython
+yt-dlp
+PyNaCl
