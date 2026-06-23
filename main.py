@@ -763,8 +763,18 @@ async def play_autocomplete(interaction: discord.Interaction, current: str):
         title = entry.get("title", "Unknown")
         duration = format_duration(entry.get("duration"))
         label = f"{title} · {duration}"[:100]
-        video_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id')}"
-        choices.append(app_commands.Choice(name=label, value=video_url))
+        video_id = entry.get("id")
+        raw_url = entry.get("url")
+        if video_id:
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+        elif raw_url and raw_url.startswith("http"):
+            video_url = raw_url
+        else:
+            # dernier recours : certains extracteurs renvoient l'id brut dans "url"
+            video_url = f"https://www.youtube.com/watch?v={raw_url}" if raw_url else None
+        if not video_url:
+            continue
+        choices.append(app_commands.Choice(name=label, value=video_url[:100]))
     return choices
 
 
@@ -782,7 +792,11 @@ async def play(interaction: discord.Interaction, query: str):
     try:
         track = await resolve_query(query, interaction.user)
     except Exception as e:
-        embed = discord.Embed(description="❌ Couldn't find or load that track.", color=0xff0000)
+        error_detail = str(e)[:200]
+        embed = discord.Embed(
+            description=f"❌ Couldn't find or load that track.\n```{error_detail}```",
+            color=0xff0000,
+        )
         await interaction.followup.send(embed=embed)
         print(f"resolve_query error: {e}")
         return
@@ -818,7 +832,19 @@ class SearchResultSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         chosen = self.results[int(self.values[0])]
-        video_url = chosen.get("url") or f"https://www.youtube.com/watch?v={chosen.get('id')}"
+        video_id = chosen.get("id")
+        raw_url = chosen.get("url")
+        if video_id:
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+        elif raw_url and raw_url.startswith("http"):
+            video_url = raw_url
+        else:
+            video_url = f"https://www.youtube.com/watch?v={raw_url}" if raw_url else None
+
+        if not video_url:
+            embed = discord.Embed(description="❌ Couldn't load that track.", color=0xff0000)
+            await interaction.followup.send(embed=embed)
+            return
 
         state = await ensure_voice_connected(interaction)
         if state is None:
@@ -827,7 +853,11 @@ class SearchResultSelect(discord.ui.Select):
         try:
             track = await resolve_query(video_url, self.requester)
         except Exception as e:
-            embed = discord.Embed(description="❌ Couldn't load that track.", color=0xff0000)
+            error_detail = str(e)[:200]
+            embed = discord.Embed(
+                description=f"❌ Couldn't load that track.\n```{error_detail}```",
+                color=0xff0000,
+            )
             await interaction.followup.send(embed=embed)
             print(f"resolve_query error (search select): {e}")
             return
