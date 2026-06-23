@@ -9,6 +9,8 @@ import datetime
 import time
 from pymongo import MongoClient
 from functools import wraps
+import yt_dlp
+import re
 
 # MongoDB setup
 mongo = None
@@ -561,6 +563,263 @@ async def config_view(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 bot.tree.add_command(config_group)
+
+# ============================================================
+# =======================  MUSIC  ===========================
+# ============================================================
+
+YTDL_OPTIONS = {
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "default_search": "ytsearch",
+    "source_address": "0.0.0.0",
+    "extract_flat": False,
+}
+
+FFMPEG_OPTIONS = {
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "options": "-vn",
+}
+
+ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+
+SPOTIFY_TRACK_RE = re.compile(r"open\.spotify\.com/track/([A-Za-z0-9]+)")
+SPOTIFY_PLAYLIST_RE = re.compile(r"open\.spotify\.com/(playlist|album)/([A-Za-z0-9]+)")
+
+
+class Track:
+    def __init__(self, title, url, webpage_url, duration, requester):
+        self.title = title
+        self.url = url  # direct stream URL (audio)
+        self.webpage_url = webpage_url  # lien à afficher
+        self.duration = duration
+        self.requester = requester
+
+
+class GuildMusicState:
+    """Garde la queue et le lecteur vocal pour un serveur donné."""
+    def __init__(self, guild_id):
+        self.guild_id = guild_id
+        self.queue = []
+        self.voice_client = None
+        self.current = None
+        self.loop_lock = asyncio.Lock()
+
+    def is_playing(self):
+        return self.voice_client is not None and self.voice_client.is_playing()
+
+
+music_states = {}  # {guild_id: GuildMusicState}
+
+
+def get_music_state(guild_id):
+    if guild_id not in music_states:
+        music_states[guild_id] = GuildMusicState(guild_id)
+    return music_states[guild_id]
+
+
+async def resolve_query(query, requester):
+    """
+    Transforme une recherche texte ou un lien YouTube/SoundCloud/Spotify en Track jouable.
+    Pour Spotify, on récupère le titre/artiste via oEmbed (pas besoin de clé API) et on recherche sur YouTube.
+    """
+    loop = asyncio.get_event_loop()
+
+    spotify_match = SPOTIFY_TRACK_RE.search(query)
+    if spotify_match:
+        # Spotify ne permet pas le streaming direct (DRM) : on récupère le titre via oEmbed et on recherche sur YouTube
+        try:
+            import urllib.request
+            import json as jsonlib
+            oembed_url = f"https://open.spotify.com/oembed?url={query}"
+            with urllib.request.urlopen(oembed_url, timeout=5) as resp:
+                data = jsonlib.loads(resp.read().decode())
+            title = data.get("title", "")
+            query = f"ytsearch:{title}"
+        except Exception:
+            query = f"ytsearch:{query}"
+    elif query.startswith("http"):
+        pass  # lien direct YouTube/SoundCloud, yt-dlp gère nativement
+    else:
+        query = f"ytsearch:{query}"
+
+    def extract():
+        info = ytdl.extract_info(query, download=False)
+        if "entries" in info:
+            info = info["entries"][0]
+        return info
+
+    info = await loop.run_in_executor(None, extract)
+    return Track(
+        title=info.get("title", "Unknown title"),
+        url=info["url"],
+        webpage_url=info.get("webpage_url", info.get("url")),
+        duration=info.get("duration"),
+        requester=requester,
+    )
+
+
+def format_duration(seconds):
+    if not seconds:
+        return "Live/Unknown"
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}:{secs:02d}"
+
+
+async def play_next(guild_id):
+    state = get_music_state(guild_id)
+    async with state.loop_lock:
+        if not state.queue:
+            state.current = None
+            return
+        track = state.queue.pop(0)
+        state.current = track
+
+        if state.voice_client is None or not state.voice_client.is_connected():
+            return
+
+        source = discord.FFmpegPCMAudio(track.url, **FFMPEG_OPTIONS)
+
+        def after_play(error):
+            if error:
+                print(f"Player error: {error}")
+            fut = asyncio.run_coroutine_threadsafe(play_next(guild_id), bot.loop)
+            try:
+                fut.result()
+            except Exception as e:
+                print(f"after_play error: {e}")
+
+        state.voice_client.play(source, after=after_play)
+
+
+@bot.tree.command(name="play", description="Play a song from YouTube, Spotify or SoundCloud")
+async def play(interaction: discord.Interaction, query: str):
+    if not await check_locked(interaction):
+        return
+    if interaction.user.voice is None or interaction.user.voice.channel is None:
+        embed = discord.Embed(description="❌ You need to be in a voice channel.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    state = get_music_state(interaction.guild_id)
+    voice_channel = interaction.user.voice.channel
+
+    if state.voice_client is None or not state.voice_client.is_connected():
+        state.voice_client = await voice_channel.connect()
+    elif state.voice_client.channel != voice_channel:
+        await state.voice_client.move_to(voice_channel)
+
+    try:
+        track = await resolve_query(query, interaction.user)
+    except Exception as e:
+        embed = discord.Embed(description=f"❌ Couldn't find or load that track.", color=0xff0000)
+        await interaction.followup.send(embed=embed)
+        print(f"resolve_query error: {e}")
+        return
+
+    state.queue.append(track)
+
+    if state.voice_client.is_playing() or state.voice_client.is_paused():
+        embed = discord.Embed(title="➕ Added to queue", color=0x3399ff)
+        embed.add_field(name="Title", value=track.title, inline=False)
+        embed.add_field(name="Duration", value=format_duration(track.duration), inline=True)
+        embed.add_field(name="Position", value=f"{len(state.queue)}", inline=True)
+        await interaction.followup.send(embed=embed)
+    else:
+        embed = discord.Embed(title="🎵 Now Playing", color=0x00cc00)
+        embed.add_field(name="Title", value=track.title, inline=False)
+        embed.add_field(name="Duration", value=format_duration(track.duration), inline=True)
+        embed.add_field(name="Requested by", value=track.requester.mention, inline=True)
+        await interaction.followup.send(embed=embed)
+        await play_next(interaction.guild_id)
+
+
+@bot.tree.command(name="pause", description="Pause the current song")
+async def pause(interaction: discord.Interaction):
+    if not await check_locked(interaction):
+        return
+    state = get_music_state(interaction.guild_id)
+    if state.voice_client and state.voice_client.is_playing():
+        state.voice_client.pause()
+        embed = discord.Embed(description="⏸️ Paused.", color=0xff6600)
+        await interaction.response.send_message(embed=embed)
+    else:
+        embed = discord.Embed(description="❌ Nothing is playing.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="resume", description="Resume the paused song")
+async def resume(interaction: discord.Interaction):
+    if not await check_locked(interaction):
+        return
+    state = get_music_state(interaction.guild_id)
+    if state.voice_client and state.voice_client.is_paused():
+        state.voice_client.resume()
+        embed = discord.Embed(description="▶️ Resumed.", color=0x00cc00)
+        await interaction.response.send_message(embed=embed)
+    else:
+        embed = discord.Embed(description="❌ Nothing is paused.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="skip", description="Skip the current song")
+async def skip(interaction: discord.Interaction):
+    if not await check_locked(interaction):
+        return
+    state = get_music_state(interaction.guild_id)
+    if state.voice_client and (state.voice_client.is_playing() or state.voice_client.is_paused()):
+        embed = discord.Embed(description="⏭️ Skipped.", color=0x3399ff)
+        await interaction.response.send_message(embed=embed)
+        state.voice_client.stop()  # déclenche after_play -> play_next automatiquement
+    else:
+        embed = discord.Embed(description="❌ Nothing is playing.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="stop", description="Stop playback and clear the queue")
+async def stop(interaction: discord.Interaction):
+    if not await check_locked(interaction):
+        return
+    state = get_music_state(interaction.guild_id)
+    state.queue.clear()
+    state.current = None
+    if state.voice_client:
+        if state.voice_client.is_playing() or state.voice_client.is_paused():
+            state.voice_client.stop()
+        await state.voice_client.disconnect()
+        state.voice_client = None
+    embed = discord.Embed(description="⏹️ Stopped and cleared the queue.", color=0xff0000)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="queue", description="Show the current music queue")
+async def queue_cmd(interaction: discord.Interaction):
+    state = get_music_state(interaction.guild_id)
+    embed = discord.Embed(title="🎶 Music Queue", color=0x3399ff)
+
+    if state.current:
+        embed.add_field(
+            name="Now Playing",
+            value=f"{state.current.title} · {format_duration(state.current.duration)}",
+            inline=False,
+        )
+    else:
+        embed.add_field(name="Now Playing", value="Nothing", inline=False)
+
+    if state.queue:
+        lines = []
+        for i, track in enumerate(state.queue[:10], start=1):
+            lines.append(f"{i}. {track.title} · {format_duration(track.duration)}")
+        embed.add_field(name="Up Next", value="\n".join(lines), inline=False)
+        if len(state.queue) > 10:
+            embed.set_footer(text=f"+ {len(state.queue) - 10} more in queue")
+    else:
+        embed.add_field(name="Up Next", value="Queue is empty", inline=False)
+
+    await interaction.response.send_message(embed=embed)
 
 # Logs
 @bot.event
