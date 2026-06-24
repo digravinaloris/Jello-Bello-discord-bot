@@ -568,8 +568,18 @@ bot.tree.add_command(config_group)
 # =======================  MUSIC  ===========================
 # ============================================================
 
+# Cookies YouTube : Render bloque souvent les requêtes anonymes ("Sign in to confirm you're not a bot").
+# On les fournit via une variable d'env (contenu du fichier cookies.txt exporté du navigateur) et on
+# les réécrit sur disque au démarrage, car yt-dlp veut un vrai fichier.
+YOUTUBE_COOKIES_CONTENT = os.getenv("YOUTUBE_COOKIES")
+YOUTUBE_COOKIES_PATH = "/tmp/youtube_cookies.txt"
+
+if YOUTUBE_COOKIES_CONTENT:
+    with open(YOUTUBE_COOKIES_PATH, "w", encoding="utf-8") as f:
+        f.write(YOUTUBE_COOKIES_CONTENT)
+
 YTDL_OPTIONS = {
-    "format": "bestaudio/best",
+    "format": "bestaudio[abr>0]/bestaudio/best",  # meilleure qualité audio dispo
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -577,11 +587,17 @@ YTDL_OPTIONS = {
     "source_address": "0.0.0.0",
     "extract_flat": False,
 }
+if YOUTUBE_COOKIES_CONTENT:
+    YTDL_OPTIONS["cookiefile"] = YOUTUBE_COOKIES_PATH
 
-FFMPEG_OPTIONS = {
+# -reconnect* : tolère les coupures réseau (fréquentes sur Render free tier)
+# -af volume : volume par défaut, ajustable dynamiquement via /volume (voir plus bas)
+FFMPEG_OPTIONS_TEMPLATE = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn",
+    "options": "-vn -af volume={volume}",
 }
+
+DEFAULT_VOLUME = 0.5  # 50%, ajustable par /volume (0.0 à 2.0)
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
@@ -606,6 +622,7 @@ class GuildMusicState:
         self.voice_client = None
         self.current = None
         self.loop_lock = asyncio.Lock()
+        self.volume = DEFAULT_VOLUME  # 0.0 à 2.0, ajustable via /volume
 
     def is_playing(self):
         return self.voice_client is not None and self.voice_client.is_playing()
@@ -680,7 +697,11 @@ async def play_next(guild_id):
         if state.voice_client is None or not state.voice_client.is_connected():
             return
 
-        source = discord.FFmpegPCMAudio(track.url, **FFMPEG_OPTIONS)
+        ffmpeg_options = {
+            "before_options": FFMPEG_OPTIONS_TEMPLATE["before_options"],
+            "options": FFMPEG_OPTIONS_TEMPLATE["options"].format(volume=state.volume),
+        }
+        source = discord.FFmpegPCMAudio(track.url, **ffmpeg_options)
 
         def after_play(error):
             if error:
@@ -951,6 +972,26 @@ async def skip(interaction: discord.Interaction):
     else:
         embed = discord.Embed(description="❌ Nothing is playing.", color=0xff0000)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="volume", description="Set the playback volume (0 to 200%)")
+async def volume(interaction: discord.Interaction, percent: app_commands.Range[int, 0, 200]):
+    if not await check_locked(interaction):
+        return
+    state = get_music_state(interaction.guild_id)
+    state.volume = percent / 100.0
+
+    if state.voice_client and (state.voice_client.is_playing() or state.voice_client.is_paused()):
+        # Redémarre la source avec le nouveau volume sans perdre la position de la queue.
+        # FFmpeg ne permet pas de changer le volume "à chaud" sans relancer le flux ; comme on
+        # ne peut pas reprendre exactement où on en était facilement, on relance le morceau courant.
+        current_track = state.current
+        if current_track:
+            state.queue.insert(0, current_track)
+        state.voice_client.stop()
+
+    embed = discord.Embed(description=f"🔊 Volume set to **{percent}%**.", color=0x3399ff)
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="stop", description="Stop playback and clear the queue")
