@@ -12,6 +12,7 @@ from functools import wraps
 import yt_dlp
 import re
 import subprocess
+import sys
 
 # MongoDB setup
 mongo = None
@@ -731,7 +732,7 @@ async def play_next(guild_id):
         print(f"[FFMPEG] Launching with executable={FFMPEG_PATH}, url={track.url[:80]}...")
         try:
             source = discord.FFmpegPCMAudio(
-                track.url, executable=FFMPEG_PATH, stderr=subprocess.PIPE, **ffmpeg_options
+                track.url, executable=FFMPEG_PATH, stderr=sys.stdout, **ffmpeg_options
             )
         except Exception as e:
             print(f"[FFMPEG] Failed to start FFmpeg process: {e}")
