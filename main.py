@@ -579,7 +579,7 @@ if YOUTUBE_COOKIES_CONTENT:
         f.write(YOUTUBE_COOKIES_CONTENT)
 
 YTDL_OPTIONS = {
-    "format": "bestaudio[abr>0]/bestaudio/best",  # meilleure qualité audio dispo
+    "format": "bestaudio/best",  # meilleure qualité audio disponible (sans filtre trop strict)
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
