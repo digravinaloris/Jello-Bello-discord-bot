@@ -4,3 +4,4 @@ pymongo
 dnspython
 yt-dlp
 PyNaCl
+imageio-ffmpeg
