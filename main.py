@@ -11,6 +11,7 @@ from pymongo import MongoClient
 from functools import wraps
 import yt_dlp
 import re
+import subprocess
 
 # MongoDB setup
 mongo = None
@@ -576,8 +577,10 @@ bot.tree.add_command(config_group)
 import imageio_ffmpeg
 try:
     FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+    print(f"[FFMPEG] Using imageio-ffmpeg binary at: {FFMPEG_PATH}")
+    print(f"[FFMPEG] File exists: {os.path.isfile(FFMPEG_PATH)}, executable: {os.access(FFMPEG_PATH, os.X_OK)}")
 except Exception as e:
-    print(f"imageio_ffmpeg failed to provide a binary, falling back to system ffmpeg: {e}")
+    print(f"[FFMPEG] imageio_ffmpeg failed to provide a binary, falling back to system ffmpeg: {e}")
     FFMPEG_PATH = "ffmpeg"
 
 # Cookies YouTube : Render bloque souvent les requêtes anonymes ("Sign in to confirm you're not a bot").
@@ -725,7 +728,15 @@ async def play_next(guild_id):
             "before_options": FFMPEG_OPTIONS_TEMPLATE["before_options"],
             "options": FFMPEG_OPTIONS_TEMPLATE["options"].format(volume=state.volume),
         }
-        source = discord.FFmpegPCMAudio(track.url, executable=FFMPEG_PATH, **ffmpeg_options)
+        print(f"[FFMPEG] Launching with executable={FFMPEG_PATH}, url={track.url[:80]}...")
+        try:
+            source = discord.FFmpegPCMAudio(
+                track.url, executable=FFMPEG_PATH, stderr=subprocess.PIPE, **ffmpeg_options
+            )
+        except Exception as e:
+            print(f"[FFMPEG] Failed to start FFmpeg process: {e}")
+            state.current = None
+            return
 
         def after_play(error):
             if error:
