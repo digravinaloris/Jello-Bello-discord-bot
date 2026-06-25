@@ -568,6 +568,12 @@ bot.tree.add_command(config_group)
 # =======================  MUSIC  ===========================
 # ============================================================
 
+# FFmpeg : Render (plan gratuit/standard) n'autorise pas apt-get (filesystem en lecture seule
+# pour les paquets système). Le build command télécharge un binaire statique FFmpeg et le copie
+# à la racine du projet -- on le détecte ici, avec repli sur le PATH système si présent ailleurs.
+_local_ffmpeg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg")
+FFMPEG_PATH = _local_ffmpeg if os.path.isfile(_local_ffmpeg) else "ffmpeg"
+
 # Cookies YouTube : Render bloque souvent les requêtes anonymes ("Sign in to confirm you're not a bot").
 # On les fournit via une variable d'env (contenu du fichier cookies.txt exporté du navigateur) et on
 # les réécrit sur disque au démarrage, car yt-dlp veut un vrai fichier.
@@ -586,6 +592,7 @@ YTDL_OPTIONS = {
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
     "extract_flat": False,
+    "ffmpeg_location": FFMPEG_PATH,
 }
 if YOUTUBE_COOKIES_CONTENT:
     YTDL_OPTIONS["cookiefile"] = YOUTUBE_COOKIES_PATH
@@ -701,7 +708,7 @@ async def play_next(guild_id):
             "before_options": FFMPEG_OPTIONS_TEMPLATE["before_options"],
             "options": FFMPEG_OPTIONS_TEMPLATE["options"].format(volume=state.volume),
         }
-        source = discord.FFmpegPCMAudio(track.url, **ffmpeg_options)
+        source = discord.FFmpegPCMAudio(track.url, executable=FFMPEG_PATH, **ffmpeg_options)
 
         def after_play(error):
             if error:
