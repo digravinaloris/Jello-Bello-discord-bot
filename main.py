@@ -569,10 +569,16 @@ bot.tree.add_command(config_group)
 # ============================================================
 
 # FFmpeg : Render (plan gratuit/standard) n'autorise pas apt-get (filesystem en lecture seule
-# pour les paquets système). Le build command télécharge un binaire statique FFmpeg et le copie
-# à la racine du projet -- on le détecte ici, avec repli sur le PATH système si présent ailleurs.
-_local_ffmpeg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg")
-FFMPEG_PATH = _local_ffmpeg if os.path.isfile(_local_ffmpeg) else "ffmpeg"
+# pour les paquets système), et le binaire statique téléchargé manuellement (johnvansickle.com)
+# segfaultait (return code -11) -- probablement une incompatibilité d'architecture/glibc avec
+# l'environnement Render. imageio-ffmpeg télécharge un binaire FFmpeg empaqueté spécifiquement
+# pour fonctionner avec l'environnement Python détecté, ce qui est beaucoup plus fiable.
+import imageio_ffmpeg
+try:
+    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+except Exception as e:
+    print(f"imageio_ffmpeg failed to provide a binary, falling back to system ffmpeg: {e}")
+    FFMPEG_PATH = "ffmpeg"
 
 # Cookies YouTube : Render bloque souvent les requêtes anonymes ("Sign in to confirm you're not a bot").
 # On les fournit via une variable d'env (contenu du fichier cookies.txt exporté du navigateur) et on
@@ -585,7 +591,9 @@ if YOUTUBE_COOKIES_CONTENT:
         f.write(YOUTUBE_COOKIES_CONTENT)
 
 YTDL_OPTIONS = {
-    "format": "bestaudio/best",  # meilleure qualité audio disponible (sans filtre trop strict)
+    # bestaudio en priorité, puis n'importe quel format jouable en dernier recours
+    # (FFmpeg extraira la piste audio même d'un format vidéo+audio combiné).
+    "format": "bestaudio/best/bv*+ba/b",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -595,10 +603,11 @@ YTDL_OPTIONS = {
     "ffmpeg_location": FFMPEG_PATH,
     # YouTube force le streaming SABR pour le client web, qui ne renvoie plus d'URL de stream
     # directe pour pas mal de formats audio ("Requested format is not available"). Les clients
-    # mobiles (android/ios) ne sont pas concernés, donc on les force explicitement.
+    # mobiles (android/ios) ne sont pas concernés, donc on les force explicitement, avec le
+    # client web en dernier repli si jamais les clients mobiles échouent pour une vidéo donnée.
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "ios"],
+            "player_client": ["android", "ios", "web"],
         }
     },
 }
