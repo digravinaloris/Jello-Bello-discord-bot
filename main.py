@@ -594,6 +594,9 @@ if YOUTUBE_COOKIES_CONTENT:
     with open(YOUTUBE_COOKIES_PATH, "w", encoding="utf-8") as f:
         f.write(YOUTUBE_COOKIES_CONTENT)
 
+DOWNLOAD_DIR = "/tmp/music_cache"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
 YTDL_OPTIONS = {
     # bestaudio en priorité, puis n'importe quel format jouable en dernier recours
     # (FFmpeg extraira la piste audio même d'un format vidéo+audio combiné).
@@ -605,6 +608,15 @@ YTDL_OPTIONS = {
     "source_address": "0.0.0.0",
     "extract_flat": False,
     "ffmpeg_location": FFMPEG_PATH,
+    # On télécharge et convertit en mp3 localement plutôt que de streamer l'URL YouTube en
+    # direct : plus stable, évite les soucis de protocole réseau qui faisaient planter FFmpeg
+    # pendant le streaming live (segfault -11 observé avec le streaming direct).
+    "outtmpl": os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s"),
+    "postprocessors": [{
+        "key": "FFmpegExtractAudio",
+        "preferredcodec": "mp3",
+        "preferredquality": "192",
+    }],
     # YouTube force le streaming SABR pour le client web, qui ne renvoie plus d'URL de stream
     # directe pour pas mal de formats audio ("Requested format is not available"). Les clients
     # mobiles (android/ios) ne sont pas concernés, donc on les force explicitement, avec le
@@ -618,10 +630,9 @@ YTDL_OPTIONS = {
 if YOUTUBE_COOKIES_CONTENT:
     YTDL_OPTIONS["cookiefile"] = YOUTUBE_COOKIES_PATH
 
-# -reconnect* : tolère les coupures réseau (fréquentes sur Render free tier)
-# -af volume : volume par défaut, ajustable dynamiquement via /volume (voir plus bas)
+# Fichier local mp3 déjà téléchargé : pas besoin de -reconnect (plus de réseau pendant la lecture).
 FFMPEG_OPTIONS_TEMPLATE = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "before_options": "",
     "options": "-vn -af volume={volume}",
 }
 
@@ -634,9 +645,9 @@ SPOTIFY_PLAYLIST_RE = re.compile(r"open\.spotify\.com/(playlist|album)/([A-Za-z0
 
 
 class Track:
-    def __init__(self, title, url, webpage_url, duration, requester):
+    def __init__(self, title, filepath, webpage_url, duration, requester):
         self.title = title
-        self.url = url  # direct stream URL (audio)
+        self.filepath = filepath  # chemin local du mp3 téléchargé
         self.webpage_url = webpage_url  # lien à afficher
         self.duration = duration
         self.requester = requester
@@ -691,16 +702,24 @@ async def resolve_query(query, requester):
         query = f"ytsearch:{query}"
 
     def extract():
-        info = ytdl.extract_info(query, download=False)
+        # download=True : on télécharge réellement le fichier, le post-processeur le convertit en mp3
+        info = ytdl.extract_info(query, download=True)
         if "entries" in info:
             info = info["entries"][0]
         return info
 
     info = await loop.run_in_executor(None, extract)
+
+    video_id = info.get("id")
+    expected_mp3_path = os.path.join(DOWNLOAD_DIR, f"{video_id}.mp3")
+
+    if not os.path.isfile(expected_mp3_path):
+        raise FileNotFoundError(f"Downloaded file not found at expected path: {expected_mp3_path}")
+
     return Track(
         title=info.get("title", "Unknown title"),
-        url=info["url"],
-        webpage_url=info.get("webpage_url", info.get("url")),
+        filepath=expected_mp3_path,
+        webpage_url=info.get("webpage_url"),
         duration=info.get("duration"),
         requester=requester,
     )
@@ -729,10 +748,11 @@ async def play_next(guild_id):
             "before_options": FFMPEG_OPTIONS_TEMPLATE["before_options"],
             "options": FFMPEG_OPTIONS_TEMPLATE["options"].format(volume=state.volume),
         }
-        print(f"[FFMPEG] Launching with executable={FFMPEG_PATH}, url={track.url[:80]}...")
+        print(f"[FFMPEG] Launching with executable={FFMPEG_PATH}, file={track.filepath}")
+        print(f"[FFMPEG] File exists: {os.path.isfile(track.filepath)}")
         try:
             source = discord.FFmpegPCMAudio(
-                track.url, executable=FFMPEG_PATH, stderr=sys.stdout, **ffmpeg_options
+                track.filepath, executable=FFMPEG_PATH, stderr=sys.stdout, **ffmpeg_options
             )
         except Exception as e:
             print(f"[FFMPEG] Failed to start FFmpeg process: {e}")
@@ -742,6 +762,14 @@ async def play_next(guild_id):
         def after_play(error):
             if error:
                 print(f"Player error: {error}")
+            # Nettoie le fichier mp3 seulement s'il n'est pas remis en queue (cas /volume qui relance le morceau courant)
+            still_queued = state.queue and state.queue[0] is track
+            if not still_queued:
+                try:
+                    if os.path.isfile(track.filepath):
+                        os.remove(track.filepath)
+                except Exception as cleanup_error:
+                    print(f"Cleanup error: {cleanup_error}")
             fut = asyncio.run_coroutine_threadsafe(play_next(guild_id), bot.loop)
             try:
                 fut.result()
@@ -1039,6 +1067,13 @@ async def stop(interaction: discord.Interaction):
     if not await check_locked(interaction):
         return
     state = get_music_state(interaction.guild_id)
+    # Nettoie les fichiers mp3 des morceaux encore en attente (espace disque limité sur Render)
+    for queued_track in state.queue:
+        try:
+            if os.path.isfile(queued_track.filepath):
+                os.remove(queued_track.filepath)
+        except Exception as e:
+            print(f"Cleanup error on stop: {e}")
     state.queue.clear()
     state.current = None
     if state.voice_client:
