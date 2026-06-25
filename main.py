@@ -593,6 +593,14 @@ YTDL_OPTIONS = {
     "source_address": "0.0.0.0",
     "extract_flat": False,
     "ffmpeg_location": FFMPEG_PATH,
+    # YouTube force le streaming SABR pour le client web, qui ne renvoie plus d'URL de stream
+    # directe pour pas mal de formats audio ("Requested format is not available"). Les clients
+    # mobiles (android/ios) ne sont pas concernés, donc on les force explicitement.
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "ios"],
+        }
+    },
 }
 if YOUTUBE_COOKIES_CONTENT:
     YTDL_OPTIONS["cookiefile"] = YOUTUBE_COOKIES_PATH
@@ -780,7 +788,11 @@ async def play_autocomplete(interaction: discord.Interaction, current: str):
         entries = cached[1]
     else:
         try:
-            entries = await search_youtube(current, max_results=8)
+            # Discord coupe la connexion après ~3s ; on se laisse une marge pour répondre à temps
+            entries = await asyncio.wait_for(search_youtube(current, max_results=5), timeout=2.5)
+        except asyncio.TimeoutError:
+            print(f"autocomplete search timeout for query: {current}")
+            return []
         except Exception as e:
             print(f"autocomplete search error: {e}")
             return []
