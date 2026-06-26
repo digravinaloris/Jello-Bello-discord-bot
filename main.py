@@ -19,13 +19,15 @@ mongo = None
 db = None
 warns_col = None
 config_col = None
+locked_channels_col = None
 
 def init_mongo():
-    global mongo, db, warns_col, config_col
+    global mongo, db, warns_col, config_col, locked_channels_col
     mongo = MongoClient(os.getenv("MONGO_URI"), serverSelectionTimeoutMS=5000)
     db = mongo["discordbot"]
     warns_col = db["warns"]
     config_col = db["config"]
+    locked_channels_col = db["locked_channels"]
     # Default config for main server
     if not config_col.find_one({"guild_id": "1471790587920388108"}):
         config_col.insert_one({
@@ -60,6 +62,23 @@ def get_warns(user_id):
 
 def set_warns(user_id, count):
     warns_col.update_one({"user_id": str(user_id)}, {"$set": {"count": count}}, upsert=True)
+
+def mark_channel_locked(guild_id, channel_id, channel_name, locked_by):
+    locked_channels_col.update_one(
+        {"guild_id": str(guild_id), "channel_id": str(channel_id)},
+        {"$set": {
+            "channel_name": channel_name,
+            "locked_by": str(locked_by),
+            "locked_at": datetime.datetime.utcnow(),
+        }},
+        upsert=True,
+    )
+
+def mark_channel_unlocked(guild_id, channel_id):
+    locked_channels_col.delete_one({"guild_id": str(guild_id), "channel_id": str(channel_id)})
+
+def get_locked_channels(guild_id):
+    return list(locked_channels_col.find({"guild_id": str(guild_id)}))
 
 # Bot setup
 intents = discord.Intents.all()
@@ -333,6 +352,7 @@ async def lock(interaction: discord.Interaction, channel: discord.TextChannel = 
     if not await check_locked(interaction): return
     channel = channel or interaction.channel
     await channel.set_permissions(interaction.guild.default_role, send_messages=False)
+    mark_channel_locked(interaction.guild_id, channel.id, channel.name, interaction.user.id)
     embed = discord.Embed(title="🔒 Channel Locked", color=0xff0000)
     embed.add_field(name="Channel", value=channel.mention, inline=True)
     embed.add_field(name="Locked by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
@@ -345,9 +365,37 @@ async def unlock(interaction: discord.Interaction, channel: discord.TextChannel 
     if not await check_locked(interaction): return
     channel = channel or interaction.channel
     await channel.set_permissions(interaction.guild.default_role, send_messages=True)
+    mark_channel_unlocked(interaction.guild_id, channel.id)
     embed = discord.Embed(title="🔓 Channel Unlocked", color=0x00cc00)
     embed.add_field(name="Channel", value=channel.mention, inline=True)
     embed.add_field(name="Unlocked by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+# /lockedchannels
+@bot.tree.command(name="lockedchannels", description="List all currently locked channels")
+async def lockedchannels(interaction: discord.Interaction):
+    if not await check_locked(interaction): return
+    locked = get_locked_channels(interaction.guild_id)
+    if not locked:
+        embed = discord.Embed(description="✅ No channels are currently locked.", color=0x00cc00)
+        await interaction.response.send_message(embed=embed)
+        return
+    embed = discord.Embed(title="🔒 Locked Channels", color=0xff0000)
+    for doc in locked:
+        channel_id = doc["channel_id"]
+        channel_name = doc.get("channel_name", "unknown")
+        locked_at = doc.get("locked_at")
+        locked_at_str = locked_at.strftime("%Y-%m-%d %H:%M UTC") if locked_at else "Unknown"
+        try:
+            locked_by_user = await bot.fetch_user(int(doc.get("locked_by")))
+            locked_by_str = str(locked_by_user)
+        except Exception:
+            locked_by_str = f"ID {doc.get('locked_by', 'unknown')}"
+        embed.add_field(
+            name=f"#{channel_name}",
+            value=f"<#{channel_id}>\nLocked by **{locked_by_str}** on {locked_at_str}",
+            inline=False,
+        )
     await interaction.response.send_message(embed=embed)
 
 # /warnlist
