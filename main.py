@@ -281,14 +281,52 @@ async def warnings(interaction: discord.Interaction, member: discord.Member):
     await interaction.followup.send(embed=embed)
 
 # /clear
-@bot.tree.command(name="clear", description="Clear messages")
+@bot.tree.command(name="clear", description="Cleans messages from a channel")
+@app_commands.describe(
+    amount="Number of messages to scan",
+    filter_by_user="Only delete messages from this user",
+    filter_by_role="Only delete messages from members with this role",
+    filter_by_bots="Only delete messages sent by bots",
+)
 @app_commands.checks.has_permissions(manage_messages=True)
-async def clear(interaction: discord.Interaction, amount: int = 10):
+async def clear(
+    interaction: discord.Interaction,
+    amount: int = 10,
+    filter_by_user: discord.Member = None,
+    filter_by_role: discord.Role = None,
+    filter_by_bots: bool = False,
+):
     if not await check_locked(interaction): return
-    embed = discord.Embed(description=f"🗑️ Clearing **{amount}** messages...", color=0x3399ff)
+
+    def message_check(message):
+        if filter_by_user and message.author.id != filter_by_user.id:
+            return False
+        if filter_by_role and (not isinstance(message.author, discord.Member) or filter_by_role not in message.author.roles):
+            return False
+        if filter_by_bots and not message.author.bot:
+            return False
+        return True
+
+    filters_active = filter_by_user or filter_by_role or filter_by_bots
+    desc = f"🗑️ Clearing **{amount}** messages"
+    if filter_by_user:
+        desc += f" from {filter_by_user.mention}"
+    if filter_by_role:
+        desc += f" with role {filter_by_role.mention}"
+    if filter_by_bots:
+        desc += " sent by bots"
+    desc += "..."
+
+    embed = discord.Embed(description=desc, color=0x3399ff)
     await interaction.response.send_message(embed=embed)
     await asyncio.sleep(2)
-    await interaction.channel.purge(limit=amount + 1)
+
+    if filters_active:
+        deleted = await interaction.channel.purge(limit=amount, check=message_check)
+        result_embed = discord.Embed(description=f"✅ Deleted **{len(deleted)}** matching message(s).", color=0x00cc00)
+        await interaction.channel.send(embed=result_embed)
+    else:
+        await interaction.channel.purge(limit=amount + 1)
 
 # /mutelist
 @bot.tree.command(name="mutelist", description="List all muted members")
