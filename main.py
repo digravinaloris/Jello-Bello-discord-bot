@@ -703,13 +703,14 @@ YTDL_OPTIONS = {
         "preferredcodec": "mp3",
         "preferredquality": "192",
     }],
-    # YouTube force le streaming SABR pour le client web, qui ne renvoie plus d'URL de stream
-    # directe pour pas mal de formats audio ("Requested format is not available"). Les clients
-    # mobiles (android/ios) ne sont pas concernés, donc on les force explicitement, avec le
-    # client web en dernier repli si jamais les clients mobiles échouent pour une vidéo donnée.
+    # YouTube exige de plus en plus un "PO Token" pour les clients android/ios/web, qu'on n'a
+    # pas configuré -- ça cause "Requested format is not available". La sélection automatique
+    # de yt-dlp est en fait la plus fiable actuellement : avec des cookies valides, elle choisit
+    # le client "tv_downgraded" qui ne nécessite pas de PO Token. On ajoute juste web_embedded
+    # en complément (recommandation officielle yt-dlp, issue #15847, fév. 2026).
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "ios", "web"],
+            "player_client": ["default", "web_embedded"],
         }
     },
 }
