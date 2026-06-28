@@ -63,11 +63,12 @@ def get_warns(user_id):
 def set_warns(user_id, count):
     warns_col.update_one({"user_id": str(user_id)}, {"$set": {"count": count}}, upsert=True)
 
-def mark_channel_locked(guild_id, channel_id, channel_name, locked_by):
+def mark_channel_locked(guild_id, channel_id, channel_name, locked_by, channel_type="text"):
     locked_channels_col.update_one(
         {"guild_id": str(guild_id), "channel_id": str(channel_id)},
         {"$set": {
             "channel_name": channel_name,
+            "channel_type": channel_type,
             "locked_by": str(locked_by),
             "locked_at": datetime.datetime.utcnow(),
         }},
@@ -409,6 +410,52 @@ async def unlock(interaction: discord.Interaction, channel: discord.TextChannel 
     embed.add_field(name="Unlocked by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
     await interaction.response.send_message(embed=embed)
 
+# /vlock
+@bot.tree.command(name="vlock", description="Lock a voice channel (prevent members from connecting)")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def vlock(interaction: discord.Interaction, channel: discord.VoiceChannel = None):
+    if not await check_locked(interaction): return
+    channel = channel or (interaction.user.voice.channel if interaction.user.voice else None)
+    if channel is None:
+        embed = discord.Embed(description="❌ Specify a voice channel or join one first.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    await channel.set_permissions(interaction.guild.default_role, connect=False)
+    mark_channel_locked(interaction.guild_id, channel.id, channel.name, interaction.user.id, channel_type="voice")
+
+    # Déconnecte tous les membres déjà présents dans le salon au moment du lock
+    disconnected = []
+    for member in channel.members:
+        try:
+            await member.move_to(None)
+            disconnected.append(member)
+        except Exception as e:
+            print(f"Failed to disconnect {member} from voice channel: {e}")
+
+    embed = discord.Embed(title="🔒 Voice Channel Locked", color=0xff0000)
+    embed.add_field(name="Channel", value=channel.mention, inline=True)
+    embed.add_field(name="Locked by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
+    if disconnected:
+        embed.add_field(name="Disconnected", value=", ".join(m.mention for m in disconnected), inline=False)
+    await interaction.response.send_message(embed=embed)
+
+# /vunlock
+@bot.tree.command(name="vunlock", description="Unlock a voice channel")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def vunlock(interaction: discord.Interaction, channel: discord.VoiceChannel = None):
+    if not await check_locked(interaction): return
+    channel = channel or (interaction.user.voice.channel if interaction.user.voice else None)
+    if channel is None:
+        embed = discord.Embed(description="❌ Specify a voice channel or join one first.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    await channel.set_permissions(interaction.guild.default_role, connect=True)
+    mark_channel_unlocked(interaction.guild_id, channel.id)
+    embed = discord.Embed(title="🔓 Voice Channel Unlocked", color=0x00cc00)
+    embed.add_field(name="Channel", value=channel.mention, inline=True)
+    embed.add_field(name="Unlocked by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
+    await interaction.response.send_message(embed=embed)
+
 # /lockedchannels
 @bot.tree.command(name="lockedchannels", description="List all currently locked channels")
 async def lockedchannels(interaction: discord.Interaction):
@@ -422,6 +469,8 @@ async def lockedchannels(interaction: discord.Interaction):
     for doc in locked:
         channel_id = doc["channel_id"]
         channel_name = doc.get("channel_name", "unknown")
+        channel_type = doc.get("channel_type", "text")
+        icon = "🔊" if channel_type == "voice" else "#"
         locked_at = doc.get("locked_at")
         locked_at_str = locked_at.strftime("%Y-%m-%d %H:%M UTC") if locked_at else "Unknown"
         try:
@@ -430,7 +479,7 @@ async def lockedchannels(interaction: discord.Interaction):
         except Exception:
             locked_by_str = f"ID {doc.get('locked_by', 'unknown')}"
         embed.add_field(
-            name=f"#{channel_name}",
+            name=f"{icon} {channel_name}",
             value=f"<#{channel_id}>\nLocked by **{locked_by_str}** on {locked_at_str}",
             inline=False,
         )
