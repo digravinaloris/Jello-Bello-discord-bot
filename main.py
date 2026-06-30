@@ -20,14 +20,16 @@ db = None
 warns_col = None
 config_col = None
 locked_channels_col = None
+sanctions_col = None
 
 def init_mongo():
-    global mongo, db, warns_col, config_col, locked_channels_col
+    global mongo, db, warns_col, config_col, locked_channels_col, sanctions_col
     mongo = MongoClient(os.getenv("MONGO_URI"), serverSelectionTimeoutMS=5000)
     db = mongo["discordbot"]
     warns_col = db["warns"]
     config_col = db["config"]
     locked_channels_col = db["locked_channels"]
+    sanctions_col = db["sanctions"]
     # Default config for main server
     if not config_col.find_one({"guild_id": "1471790587920388108"}):
         config_col.insert_one({
@@ -80,6 +82,25 @@ def mark_channel_unlocked(guild_id, channel_id):
 
 def get_locked_channels(guild_id):
     return list(locked_channels_col.find({"guild_id": str(guild_id)}))
+
+def log_sanction(guild_id, user_id, sanction_type, reason, moderator_id):
+    """Enregistre une sanction dans l'historique. moderator_id peut être un ID Discord,
+    'mobile_app' (action via l'app Android), ou 'automod' (déclenchée automatiquement)."""
+    sanctions_col.insert_one({
+        "guild_id": str(guild_id),
+        "user_id": str(user_id),
+        "type": sanction_type,
+        "reason": reason or "No reason provided",
+        "moderator_id": str(moderator_id),
+        "timestamp": datetime.datetime.utcnow(),
+    })
+
+def get_sanction_history(guild_id, user_id, limit=15):
+    return list(
+        sanctions_col.find({"guild_id": str(guild_id), "user_id": str(user_id)})
+        .sort("timestamp", -1)
+        .limit(limit)
+    )
 
 # Bot setup
 intents = discord.Intents.all()
@@ -142,6 +163,7 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
         return
     try:
         await member.ban(reason=reason)
+        log_sanction(interaction.guild_id, member.id, "ban", reason, interaction.user.id)
         embed = discord.Embed(title="🔨 Member Banned", color=0xff0000)
         embed.add_field(name="User", value=f"**{member}**", inline=True)
         embed.add_field(name="Banned by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
@@ -163,6 +185,7 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
         return
     try:
         await member.kick(reason=reason)
+        log_sanction(interaction.guild_id, member.id, "kick", reason, interaction.user.id)
         embed = discord.Embed(title="👢 Member Kicked", color=0xff0000)
         embed.add_field(name="User", value=f"**{member}**", inline=True)
         embed.add_field(name="Kicked by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
@@ -185,6 +208,7 @@ async def mute(interaction: discord.Interaction, member: discord.Member, minutes
     try:
         duration = datetime.timedelta(minutes=minutes)
         await member.timeout(duration, reason=reason)
+        log_sanction(interaction.guild_id, member.id, "mute", f"{reason} ({minutes} min)", interaction.user.id)
         embed = discord.Embed(title="🔇 Member Muted", color=0xff6600)
         embed.add_field(name="User", value=f"**{member}**", inline=True)
         embed.add_field(name="Muted by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
@@ -241,6 +265,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
     await interaction.response.defer()
     count = get_warns(member.id) + 1
     set_warns(member.id, count)
+    log_sanction(interaction.guild_id, member.id, "warn", reason, interaction.user.id)
     embed = discord.Embed(title="⚠️ Member Warned", color=0xffcc00)
     embed.add_field(name="User", value=f"**{member}**", inline=True)
     embed.add_field(name="Warned by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
@@ -504,6 +529,52 @@ async def warnlist(interaction: discord.Interaction):
             embed.add_field(name=f"{user}", value=f"{doc['count']} warning(s)", inline=False)
         except:
             embed.add_field(name=f"Unknown ({doc['user_id']})", value=f"{doc['count']} warning(s)", inline=False)
+    await interaction.followup.send(embed=embed)
+
+# /history
+SANCTION_ICONS = {
+    "ban": "🔨",
+    "kick": "👢",
+    "mute": "🔇",
+    "warn": "⚠️",
+    "automod_spam": "🤖",
+    "automod_link": "🔗",
+    "automod_caps": "🔠",
+}
+
+@bot.tree.command(name="history", description="Show moderation history for a member")
+async def history(interaction: discord.Interaction, member: discord.Member):
+    if not await check_locked(interaction): return
+    await interaction.response.defer()
+    records = get_sanction_history(interaction.guild_id, member.id)
+    if not records:
+        embed = discord.Embed(description=f"✅ No sanctions found for **{member}**.", color=0x00cc00)
+        await interaction.followup.send(embed=embed)
+        return
+
+    embed = discord.Embed(title=f"📋 Sanction History — {member}", color=0x3399ff)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    for record in records:
+        icon = SANCTION_ICONS.get(record["type"], "•")
+        date_str = record["timestamp"].strftime("%Y-%m-%d %H:%M UTC")
+        mod_id = record.get("moderator_id", "")
+        if mod_id == "mobile_app":
+            mod_str = "📱 Mobile App"
+        elif mod_id == "automod":
+            mod_str = "🤖 AutoMod"
+        else:
+            try:
+                mod_user = await bot.fetch_user(int(mod_id))
+                mod_str = str(mod_user)
+            except Exception:
+                mod_str = f"ID {mod_id}"
+        embed.add_field(
+            name=f"{icon} {record['type'].replace('_', ' ').title()} — {date_str}",
+            value=f"Reason: {record['reason']}\nBy: {mod_str}",
+            inline=False,
+        )
+    if len(records) >= 15:
+        embed.set_footer(text="Showing the 15 most recent sanctions")
     await interaction.followup.send(embed=embed)
 
 # /banlist
@@ -1247,6 +1318,113 @@ async def queue_cmd(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
+# ============================================================
+# ===================  AUTO-MODERATION  =====================
+# ============================================================
+
+# Suivi en mémoire des messages récents par utilisateur, pour la détection de spam.
+# Pas besoin de persister ça en DB : ça repart à zéro si le bot redémarre, ce qui est très bien.
+_recent_messages = {}  # {(guild_id, user_id): [timestamps]}
+
+SPAM_MESSAGE_COUNT = 5
+SPAM_WINDOW_SECONDS = 5
+CAPS_MIN_LENGTH = 10
+CAPS_RATIO_THRESHOLD = 0.7
+INVITE_LINK_RE = re.compile(r"(discord\.gg/|discord(?:app)?\.com/invite/)", re.IGNORECASE)
+
+
+def is_automod_exempt(member, cfg):
+    """Les modérateurs (rôles autorisés, permission gérer les messages, owner) ne sont jamais auto-modérés."""
+    if member.id == OWNER_ID:
+        return True
+    if member.guild_permissions.manage_messages:
+        return True
+    allowed = set(cfg.get("allowed_roles", []))
+    member_roles = {role.id for role in member.roles}
+    if member_roles & allowed:
+        return True
+    return False
+
+
+def check_spam(guild_id, user_id):
+    key = (guild_id, user_id)
+    now = time.time()
+    timestamps = _recent_messages.get(key, [])
+    timestamps = [t for t in timestamps if now - t < SPAM_WINDOW_SECONDS]
+    timestamps.append(now)
+    _recent_messages[key] = timestamps
+    return len(timestamps) > SPAM_MESSAGE_COUNT
+
+
+def check_caps(content):
+    letters = [c for c in content if c.isalpha()]
+    if len(content) < CAPS_MIN_LENGTH or len(letters) < CAPS_MIN_LENGTH:
+        return False
+    upper_count = sum(1 for c in letters if c.isupper())
+    return (upper_count / len(letters)) > CAPS_RATIO_THRESHOLD
+
+
+def check_invite_link(content):
+    return bool(INVITE_LINK_RE.search(content))
+
+
+async def apply_automod_action(message, violation_type, reason):
+    """Supprime le message, ajoute un avertissement, logue la sanction et notifie dans le channel + logs."""
+    try:
+        await message.delete()
+    except Exception as e:
+        print(f"AutoMod: failed to delete message: {e}")
+
+    count = get_warns(message.author.id) + 1
+    set_warns(message.author.id, count)
+    log_sanction(message.guild.id, message.author.id, violation_type, reason, "automod")
+
+    warning_embed = discord.Embed(
+        description=f"⚠️ {message.author.mention}, {reason}. This has been logged as a warning ({count} total).",
+        color=0xffcc00,
+    )
+    try:
+        warning_msg = await message.channel.send(embed=warning_embed)
+        await asyncio.sleep(5)
+        await warning_msg.delete()
+    except Exception as e:
+        print(f"AutoMod: failed to send/delete warning message: {e}")
+
+    cfg = get_config(message.guild.id)
+    log_channel = discord.utils.get(message.guild.text_channels, name=cfg.get("logs_channel", "logs"))
+    if log_channel:
+        icon = SANCTION_ICONS.get(violation_type, "🤖")
+        log_embed = discord.Embed(title=f"{icon} AutoMod Action", color=0xffcc00)
+        log_embed.add_field(name="User", value=f"**{message.author}**", inline=True)
+        log_embed.add_field(name="Channel", value=message.channel.mention, inline=True)
+        log_embed.add_field(name="Reason", value=reason, inline=False)
+        log_embed.add_field(name="Total Warnings", value=f"{count}", inline=True)
+        log_embed.set_thumbnail(url=message.author.display_avatar.url)
+        await log_channel.send(embed=log_embed)
+
+
+@bot.event
+async def on_message(message):
+    if message.guild is None or message.author.bot:
+        return
+
+    cfg = get_config(message.guild.id)
+
+    if not is_automod_exempt(message.author, cfg):
+        if check_invite_link(message.content):
+            await apply_automod_action(message, "automod_link", "posting an invite link")
+            return
+        if check_spam(message.guild.id, message.author.id):
+            await apply_automod_action(message, "automod_spam", "sending messages too quickly")
+            return
+        if check_caps(message.content):
+            await apply_automod_action(message, "automod_caps", "excessive use of capital letters")
+            return
+
+    # Nécessaire pour que les éventuelles commandes à préfixe continuent de fonctionner
+    # (aucune n'est définie actuellement, mais ça évite un piège classique si on en ajoute plus tard)
+    await bot.process_commands(message)
+
 # Logs
 @bot.event
 async def on_member_join(member):
@@ -1538,6 +1716,7 @@ def ban_member_route(guild_id, user_id):
         if member.top_role >= guild.me.top_role:
             return False, "Role too high"
         await member.ban(reason=reason)
+        log_sanction(guild_id, user_id, "ban", reason, "mobile_app")
         await log_ban(guild, member, reason)
         return True, None
 
@@ -1569,6 +1748,7 @@ def kick_member_route(guild_id, user_id):
         if member.top_role >= guild.me.top_role:
             return False, "Role too high"
         await member.kick(reason=reason)
+        log_sanction(guild_id, user_id, "kick", reason, "mobile_app")
         await log_kick(guild, member, reason)
         return True, None
 
@@ -1657,6 +1837,7 @@ def mute_member_route(guild_id, user_id):
             return False, "Role too high"
         duration = datetime.timedelta(minutes=minutes)
         await member.timeout(duration, reason=reason)
+        log_sanction(guild_id, user_id, "mute", f"{reason} ({minutes} min)", "mobile_app")
         await log_mute(guild, member, minutes, reason)
         return True, None
 
@@ -1713,6 +1894,7 @@ def warn_member_route(guild_id, user_id):
 
     count = get_warns(user_id) + 1
     set_warns(user_id, count)
+    log_sanction(guild_id, user_id, "warn", reason, "mobile_app")
 
     try:
         run_coroutine(log_warn(guild, member, reason, count))
