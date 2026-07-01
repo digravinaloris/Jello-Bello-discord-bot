@@ -21,15 +21,17 @@ warns_col = None
 config_col = None
 locked_channels_col = None
 sanctions_col = None
+reaction_roles_col = None
 
 def init_mongo():
-    global mongo, db, warns_col, config_col, locked_channels_col, sanctions_col
+    global mongo, db, warns_col, config_col, locked_channels_col, sanctions_col, reaction_roles_col
     mongo = MongoClient(os.getenv("MONGO_URI"), serverSelectionTimeoutMS=5000)
     db = mongo["discordbot"]
     warns_col = db["warns"]
     config_col = db["config"]
     locked_channels_col = db["locked_channels"]
     sanctions_col = db["sanctions"]
+    reaction_roles_col = db["reaction_roles"]
     # Default config for main server
     if not config_col.find_one({"guild_id": "1471790587920388108"}):
         config_col.insert_one({
@@ -102,6 +104,38 @@ def get_sanction_history(guild_id, user_id, limit=15):
         .limit(limit)
     )
 
+def save_reaction_role(guild_id, message_id, channel_id, emoji, role_id):
+    reaction_roles_col.update_one(
+        {"guild_id": str(guild_id), "message_id": str(message_id), "emoji": str(emoji)},
+        {"$set": {"channel_id": str(channel_id), "role_id": str(role_id)}},
+        upsert=True,
+    )
+
+def get_reaction_role(guild_id, message_id, emoji):
+    return reaction_roles_col.find_one({
+        "guild_id": str(guild_id),
+        "message_id": str(message_id),
+        "emoji": str(emoji),
+    })
+
+def delete_reaction_roles(guild_id, message_id):
+    reaction_roles_col.delete_many({"guild_id": str(guild_id), "message_id": str(message_id)})
+
+# Tempbans actifs : {(guild_id, user_id): timestamp_unban}
+# Stocké en mémoire + DB pour survivre aux redémarrages
+def save_tempban(guild_id, user_id, unban_at):
+    sanctions_col.update_one(
+        {"guild_id": str(guild_id), "user_id": str(user_id), "type": "tempban_active"},
+        {"$set": {"unban_at": unban_at}},
+        upsert=True,
+    )
+
+def remove_tempban(guild_id, user_id):
+    sanctions_col.delete_one({"guild_id": str(guild_id), "user_id": str(user_id), "type": "tempban_active"})
+
+def get_active_tempbans():
+    return list(sanctions_col.find({"type": "tempban_active"}))
+
 # Bot setup
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -151,6 +185,7 @@ async def on_ready():
     except Exception as e:
         print(f"Sync error: {e}")
     print(f"{bot.user} is online!")
+    bot.loop.create_task(tempban_check_loop())
 
 # /ban
 @bot.tree.command(name="ban", description="Ban a member")
@@ -773,6 +808,182 @@ async def config_view(interaction: discord.Interaction):
 bot.tree.add_command(config_group)
 
 # ============================================================
+# ===========  USERINFO / SERVERINFO / TEMPBAN / REACTION ROLES
+# ============================================================
+
+def parse_duration(duration_str: str) -> int:
+    """Convertit une durée humaine ('1h', '2d', '30m', '1w') en secondes. Retourne -1 si invalide."""
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+    match = re.fullmatch(r"(\d+)([smhdw])", duration_str.strip().lower())
+    if not match:
+        return -1
+    return int(match.group(1)) * units[match.group(2)]
+
+
+async def tempban_check_loop():
+    """Tâche de fond qui lève les tempbans arrivés à expiration, toutes les 60 secondes."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            now = datetime.datetime.utcnow()
+            for doc in get_active_tempbans():
+                if doc["unban_at"] <= now:
+                    guild = bot.get_guild(int(doc["guild_id"]))
+                    if guild:
+                        try:
+                            user = await bot.fetch_user(int(doc["user_id"]))
+                            await guild.unban(user, reason="Tempban expired")
+                            remove_tempban(doc["guild_id"], doc["user_id"])
+                            cfg = get_config(doc["guild_id"])
+                            log_ch = discord.utils.get(guild.text_channels, name=cfg.get("logs_channel", "logs"))
+                            if log_ch:
+                                embed = discord.Embed(title="✅ Tempban Expired", color=0x00cc00)
+                                embed.add_field(name="User", value=f"**{user}**", inline=True)
+                                await log_ch.send(embed=embed)
+                        except Exception as e:
+                            print(f"Tempban unban error: {e}")
+                            remove_tempban(doc["guild_id"], doc["user_id"])
+        except Exception as e:
+            print(f"Tempban loop error: {e}")
+        await asyncio.sleep(60)
+
+
+@bot.tree.command(name="userinfo", description="Show information about a member")
+async def userinfo(interaction: discord.Interaction, member: discord.Member = None):
+    member = member or interaction.user
+    roles = [r.mention for r in member.roles if not r.is_default()]
+    roles_str = " ".join(roles) if roles else "None"
+    joined_at = member.joined_at.strftime("%Y-%m-%d %H:%M UTC") if member.joined_at else "Unknown"
+    created_at = member.created_at.strftime("%Y-%m-%d %H:%M UTC")
+    status_icons = {
+        discord.Status.online: "🟢 Online",
+        discord.Status.idle: "🟡 Idle",
+        discord.Status.dnd: "🔴 Do Not Disturb",
+        discord.Status.offline: "⚫ Offline",
+    }
+    status = status_icons.get(member.status, "⚫ Offline")
+    warn_count = get_warns(member.id)
+    embed = discord.Embed(title=f"👤 {member}", color=member.color if member.color.value else 0x3399ff)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="ID", value=str(member.id), inline=True)
+    embed.add_field(name="Status", value=status, inline=True)
+    embed.add_field(name="Bot", value="Yes" if member.bot else "No", inline=True)
+    embed.add_field(name="Joined Server", value=joined_at, inline=True)
+    embed.add_field(name="Account Created", value=created_at, inline=True)
+    embed.add_field(name="Warnings", value=str(warn_count), inline=True)
+    embed.add_field(name=f"Roles ({len(roles)})", value=roles_str[:1024] if roles_str else "None", inline=False)
+    embed.add_field(name="Top Role", value=member.top_role.mention if not member.top_role.is_default() else "None", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="serverinfo", description="Show information about the server")
+async def serverinfo(interaction: discord.Interaction):
+    guild = interaction.guild
+    created_at = guild.created_at.strftime("%Y-%m-%d %H:%M UTC")
+    text_channels = len(guild.text_channels)
+    voice_channels = len(guild.voice_channels)
+    total_channels = text_channels + voice_channels
+    bots = sum(1 for m in guild.members if m.bot)
+    humans = guild.member_count - bots
+    embed = discord.Embed(title=f"🌐 {guild.name}", color=0x3399ff)
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    embed.add_field(name="ID", value=str(guild.id), inline=True)
+    embed.add_field(name="Owner", value=f"<@{guild.owner_id}>", inline=True)
+    embed.add_field(name="Created", value=created_at, inline=True)
+    embed.add_field(name="Members", value=f"👥 {humans} humans · 🤖 {bots} bots", inline=True)
+    embed.add_field(name="Channels", value=f"💬 {text_channels} text · 🔊 {voice_channels} voice", inline=True)
+    embed.add_field(name="Roles", value=str(len(guild.roles) - 1), inline=True)
+    embed.add_field(name="Boosts", value=f"⚡ {guild.premium_subscription_count} (Level {guild.premium_tier})", inline=True)
+    embed.add_field(name="Verification Level", value=str(guild.verification_level).title(), inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="tempban", description="Temporarily ban a member")
+@app_commands.checks.has_permissions(ban_members=True)
+@app_commands.describe(duration="Duration: 30m, 2h, 1d, 1w")
+async def tempban(interaction: discord.Interaction, member: discord.Member, duration: str, reason: str = "No reason provided"):
+    if not await check_locked(interaction): return
+    if member.top_role >= interaction.guild.me.top_role:
+        embed = discord.Embed(description="❌ I can't ban this member, their role is too high.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    seconds = parse_duration(duration)
+    if seconds <= 0:
+        embed = discord.Embed(description="❌ Invalid duration. Use `30m`, `2h`, `1d`, `1w`.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    unban_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=seconds)
+    try:
+        await member.ban(reason=f"[Tempban {duration}] {reason}")
+        save_tempban(interaction.guild_id, member.id, unban_at)
+        log_sanction(interaction.guild_id, member.id, "ban", f"[Tempban {duration}] {reason}", interaction.user.id)
+        embed = discord.Embed(title="⏳ Member Tempbanned", color=0xff6600)
+        embed.add_field(name="User", value=f"**{member}**", inline=True)
+        embed.add_field(name="Duration", value=duration, inline=True)
+        embed.add_field(name="Unbanned at", value=unban_at.strftime("%Y-%m-%d %H:%M UTC"), inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Banned by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        embed = discord.Embed(description=f"❌ Couldn't ban this member: {e}", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="reactionrole", description="Create a reaction role message")
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.describe(
+    title="Title of the embed",
+    channel="Channel where to post the embed",
+    pairs="Emoji/role pairs separated by commas, e.g: 🎮 Gamer, 🎵 Music, 🎨 Art"
+)
+async def reactionrole(interaction: discord.Interaction, title: str, channel: discord.TextChannel, pairs: str):
+    if not await check_locked(interaction): return
+    await interaction.response.defer(ephemeral=True)
+
+    # Parse les paires emoji/rôle depuis la string
+    # Format attendu: "emoji RoleName, emoji RoleName, ..."
+    parsed = []
+    for pair in pairs.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        parts = pair.split(None, 1)  # split sur le premier espace
+        if len(parts) != 2:
+            await interaction.followup.send(f"❌ Invalid pair: `{pair}` — expected `emoji RoleName`", ephemeral=True)
+            return
+        emoji_str, role_name = parts[0].strip(), parts[1].strip()
+        role = discord.utils.get(interaction.guild.roles, name=role_name)
+        if not role:
+            await interaction.followup.send(f"❌ Role `{role_name}` not found.", ephemeral=True)
+            return
+        if role >= interaction.guild.me.top_role:
+            await interaction.followup.send(f"❌ Role `{role_name}` is too high for me to manage.", ephemeral=True)
+            return
+        parsed.append((emoji_str, role))
+
+    if not parsed:
+        await interaction.followup.send("❌ No valid emoji/role pairs found.", ephemeral=True)
+        return
+
+    description = "\n".join(f"{emoji} — {role.mention}" for emoji, role in parsed)
+    embed = discord.Embed(title=title, description=description, color=0x3399ff)
+    embed.set_footer(text="React to get the corresponding role")
+
+    try:
+        msg = await channel.send(embed=embed)
+        for emoji_str, role in parsed:
+            try:
+                await msg.add_reaction(emoji_str)
+                save_reaction_role(interaction.guild_id, msg.id, channel.id, emoji_str, role.id)
+            except discord.HTTPException:
+                await interaction.followup.send(f"⚠️ Couldn't add reaction for `{emoji_str}` — make sure it's a valid emoji.", ephemeral=True)
+        await interaction.followup.send(f"✅ Reaction role message created in {channel.mention}!", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to create message: {e}", ephemeral=True)
+
+# ============================================================
 # =======================  MUSIC  ===========================
 # ============================================================
 
@@ -1326,7 +1537,7 @@ async def queue_cmd(interaction: discord.Interaction):
 # Pas besoin de persister ça en DB : ça repart à zéro si le bot redémarre, ce qui est très bien.
 _recent_messages = {}  # {(guild_id, user_id): [timestamps]}
 
-SPAM_MESSAGE_COUNT = 5
+SPAM_MESSAGE_COUNT = 10
 SPAM_WINDOW_SECONDS = 5
 CAPS_MIN_LENGTH = 10
 CAPS_RATIO_THRESHOLD = 0.7
@@ -1477,6 +1688,47 @@ async def on_message_edit(before, after):
         embed.add_field(name="Before", value=before.content or "*(empty)*", inline=False)
         embed.add_field(name="After", value=after.content or "*(empty)*", inline=False)
         await channel.send(embed=embed)
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.guild_id is None or payload.member is None or payload.member.bot:
+        return
+    emoji_str = str(payload.emoji)
+    doc = get_reaction_role(payload.guild_id, payload.message_id, emoji_str)
+    if not doc:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    role = guild.get_role(int(doc["role_id"]))
+    if role and role < guild.me.top_role:
+        try:
+            await payload.member.add_roles(role, reason="Reaction role")
+        except Exception as e:
+            print(f"Reaction role add error: {e}")
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if payload.guild_id is None:
+        return
+    emoji_str = str(payload.emoji)
+    doc = get_reaction_role(payload.guild_id, payload.message_id, emoji_str)
+    if not doc:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    member = guild.get_member(payload.user_id)
+    if not member or member.bot:
+        return
+    role = guild.get_role(int(doc["role_id"]))
+    if role and role < guild.me.top_role:
+        try:
+            await member.remove_roles(role, reason="Reaction role removed")
+        except Exception as e:
+            print(f"Reaction role remove error: {e}")
 
 
 # ============================================================
