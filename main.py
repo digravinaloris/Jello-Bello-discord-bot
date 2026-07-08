@@ -984,6 +984,124 @@ async def reactionrole(interaction: discord.Interaction, title: str, channel: di
         await interaction.followup.send(f"❌ Failed to create message: {e}", ephemeral=True)
 
 # ============================================================
+# ====================  APPLY SYSTEM  =======================
+# ============================================================
+
+class ApplicationModal(discord.ui.Modal):
+    def __init__(self, role: discord.Role):
+        super().__init__(title=f"Application for {role.name}")
+        self.role = role
+        self.question1 = discord.ui.TextInput(
+            label="Why do you want this role?",
+            style=discord.TextStyle.paragraph,
+            max_length=500,
+            required=True,
+        )
+        self.question2 = discord.ui.TextInput(
+            label="How old are you?",
+            style=discord.TextStyle.short,
+            max_length=50,
+            required=True,
+        )
+        self.question3 = discord.ui.TextInput(
+            label="What can you bring to the team?",
+            style=discord.TextStyle.paragraph,
+            max_length=500,
+            required=True,
+        )
+        self.add_item(self.question1)
+        self.add_item(self.question2)
+        self.add_item(self.question3)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "✅ Your application has been submitted! You'll be notified of the decision.", ephemeral=True
+        )
+        owner = await interaction.client.fetch_user(OWNER_ID)
+        embed = discord.Embed(title=f"📋 New Application — {self.role.name}", color=0x3399ff)
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.add_field(name="Applicant", value=f"{interaction.user.mention} ({interaction.user})", inline=False)
+        embed.add_field(name="Server", value=interaction.guild.name, inline=True)
+        embed.add_field(name="Role", value=self.role.mention, inline=True)
+        embed.add_field(name="Why this role?", value=self.question1.value, inline=False)
+        embed.add_field(name="Age", value=self.question2.value, inline=True)
+        embed.add_field(name="What they bring", value=self.question3.value, inline=False)
+        view = ApplicationDecisionView(
+            applicant_id=interaction.user.id,
+            guild_id=interaction.guild_id,
+            role_id=self.role.id,
+        )
+        try:
+            await owner.send(embed=embed, view=view)
+        except Exception as e:
+            print(f"Apply DM error: {e}")
+
+
+class ApplicationDecisionView(discord.ui.View):
+    def __init__(self, applicant_id, guild_id, role_id):
+        super().__init__(timeout=None)
+        self.applicant_id = applicant_id
+        self.guild_id = guild_id
+        self.role_id = role_id
+
+    @discord.ui.button(label="✅ Accept", style=discord.ButtonStyle.green, custom_id="apply_accept")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.client.get_guild(self.guild_id)
+        if not guild:
+            await interaction.response.send_message("❌ Guild not found.", ephemeral=True)
+            return
+        member = guild.get_member(self.applicant_id)
+        role = guild.get_role(self.role_id)
+        if member and role:
+            try:
+                await member.add_roles(role, reason="Application accepted")
+                try:
+                    dm_embed = discord.Embed(
+                        title="✅ Application Accepted!",
+                        description=f"Your application for **{role.name}** on **{guild.name}** has been **accepted**. The role has been given to you!",
+                        color=0x00cc00,
+                    )
+                    await member.send(embed=dm_embed)
+                except Exception:
+                    pass
+                await interaction.response.send_message(f"✅ Accepted — {role.name} given to {member}.", ephemeral=True)
+            except Exception as e:
+                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Member or role not found.", ephemeral=True)
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
+
+    @discord.ui.button(label="❌ Refuse", style=discord.ButtonStyle.red, custom_id="apply_refuse")
+    async def refuse(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.client.get_guild(self.guild_id)
+        if guild:
+            member = guild.get_member(self.applicant_id)
+            role = guild.get_role(self.role_id)
+            if member:
+                try:
+                    dm_embed = discord.Embed(
+                        title="❌ Application Refused",
+                        description=f"Your application for **{role.name if role else 'the role'}** on **{guild.name}** has been **refused**.",
+                        color=0xff0000,
+                    )
+                    await member.send(embed=dm_embed)
+                except Exception:
+                    pass
+        await interaction.response.send_message("❌ Application refused.", ephemeral=True)
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
+
+
+@bot.tree.command(name="apply", description="Apply for a role")
+@app_commands.describe(role="The role you want to apply for")
+async def apply(interaction: discord.Interaction, role: discord.Role):
+    if not await check_locked(interaction): return
+    await interaction.response.send_modal(ApplicationModal(role=role))
+
+# ============================================================
 # =======================  MUSIC  ===========================
 # ============================================================
 
