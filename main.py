@@ -11,6 +11,7 @@ from pymongo import MongoClient
 from functools import wraps
 import yt_dlp
 import re
+import secrets
 import subprocess
 import sys
 
@@ -32,16 +33,6 @@ def init_mongo():
     locked_channels_col = db["locked_channels"]
     sanctions_col = db["sanctions"]
     reaction_roles_col = db["reaction_roles"]
-    # Default config for main server
-    if not config_col.find_one({"guild_id": "1471790587920388108"}):
-        config_col.insert_one({
-            "guild_id": "1471790587920388108",
-            "logs_channel": "logs",
-            "autorole": 1471790587920388114,
-            "allowed_roles": [1471790588272836631, 1471790588272836630, 1511459295475142747],
-            "safe_roles": [1471790588272836631, 1511459295475142747],
-            "safe_password": "Digravina@21"
-        })
 
 def get_config(guild_id):
     doc = config_col.find_one({"guild_id": str(guild_id)})
@@ -51,8 +42,7 @@ def get_config(guild_id):
             "logs_channel": "logs",
             "autorole": None,
             "allowed_roles": [],
-            "safe_roles": [],
-            "safe_password": "Digravina@21"
+            "command_roles": {}
         }
         config_col.insert_one(doc)
     return doc
@@ -60,12 +50,28 @@ def get_config(guild_id):
 def update_config(guild_id, key, value):
     config_col.update_one({"guild_id": str(guild_id)}, {"$set": {key: value}}, upsert=True)
 
-def get_warns(user_id):
-    doc = warns_col.find_one({"user_id": str(user_id)})
+def add_command_role(guild_id, command_name, role_id):
+    """Autorise un rôle à utiliser une commande spécifique pour ce serveur."""
+    config_col.update_one(
+        {"guild_id": str(guild_id)},
+        {"$addToSet": {f"command_roles.{command_name}": role_id}},
+        upsert=True,
+    )
+
+def remove_command_role(guild_id, command_name, role_id):
+    """Retire l'autorisation d'un rôle pour une commande spécifique sur ce serveur."""
+    config_col.update_one(
+        {"guild_id": str(guild_id)},
+        {"$pull": {f"command_roles.{command_name}": role_id}},
+        upsert=True,
+    )
+
+def get_warns(guild_id, user_id):
+    doc = warns_col.find_one({"guild_id": str(guild_id), "user_id": str(user_id)})
     return doc["count"] if doc else 0
 
-def set_warns(user_id, count):
-    warns_col.update_one({"user_id": str(user_id)}, {"$set": {"count": count}}, upsert=True)
+def set_warns(guild_id, user_id, count):
+    warns_col.update_one({"guild_id": str(guild_id), "user_id": str(user_id)}, {"$set": {"count": count}}, upsert=True)
 
 def mark_channel_locked(guild_id, channel_id, channel_name, locked_by, channel_type="text"):
     locked_channels_col.update_one(
@@ -139,41 +145,60 @@ def get_active_tempbans():
 # Bot setup
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
-bot.locked = False
-bot.config_unlocked = {}  # {guild_id: unlock_timestamp}
+bot.locked_guilds = set()  # {guild_id, ...} — serveurs actuellement verrouillés (par serveur, pas global)
 bot.ready_event = None  # set in on_ready, used so Flask waits until bot is ready
 
-OWNER_ID = 1251903591656980504
 API_KEY = os.getenv("API_KEY")  # clé secrète pour protéger l'API, à définir sur Render
 
-def is_config_unlocked(guild_id):
-    unlock_time = bot.config_unlocked.get(guild_id)
-    if unlock_time and time.time() - unlock_time < 900:  # 15 min
-        return True
-    return False
-
-def has_allowed_role():
+def has_admin():
+    """Decorator: réservé aux membres avec la permission Discord Administrator."""
     async def predicate(interaction: discord.Interaction):
-        if bot.locked and interaction.user.id != OWNER_ID:
-            embed = discord.Embed(description="🔒 Bot is currently locked by the owner.", color=0xff0000)
-            await interaction.response.send_message(embed=embed)
-            return False
-        cfg = get_config(interaction.guild_id)
-        allowed = set(cfg.get("allowed_roles", []))
-        user_roles = {role.id for role in interaction.user.roles}
-        if not user_roles & allowed:
-            embed = discord.Embed(description="❌ You don't have permission to use this command.", color=0xff0000)
-            await interaction.response.send_message(embed=embed)
+        if not interaction.user.guild_permissions.administrator:
+            embed = discord.Embed(description="❌ You need Administrator permission to use this command.", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return False
         return True
     return app_commands.check(predicate)
 
-async def check_locked(interaction: discord.Interaction):
-    if bot.locked and interaction.user.id != OWNER_ID:
-        embed = discord.Embed(description="🔒 Bot is currently locked by the owner.", color=0xff0000)
-        await interaction.response.send_message(embed=embed)
+def has_owner():
+    """Decorator: réservé au owner du serveur (interaction.guild.owner_id), même les admins ne passent pas."""
+    async def predicate(interaction: discord.Interaction):
+        if interaction.user.id != interaction.guild.owner_id:
+            embed = discord.Embed(description="❌ Only the server owner can use this command.", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return False
+        return True
+    return app_commands.check(predicate)
+
+async def check_access(interaction: discord.Interaction, command_name: str, native_permission: str = None) -> bool:
+    """Vérifie si l'utilisateur peut utiliser une commande donnée.
+    - Si CE serveur est verrouillé, seuls les admins passent.
+    - Les administrateurs du serveur passent toujours.
+    - Si des rôles ont été configurés pour cette commande via /config allow, seuls ces rôles (ou un admin) peuvent l'utiliser.
+    - Sinon, retombe sur la permission Discord native fournie (ou ouvert à tous si aucune n'est fournie).
+    """
+    if interaction.guild_id in bot.locked_guilds and not interaction.user.guild_permissions.administrator:
+        embed = discord.Embed(description="🔒 The bot is currently locked on this server.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return False
-    return True
+    if interaction.user.guild_permissions.administrator:
+        return True
+    cfg = get_config(interaction.guild_id)
+    allowed_roles = set(cfg.get("command_roles", {}).get(command_name, []))
+    if allowed_roles:
+        user_roles = {role.id for role in interaction.user.roles}
+        if user_roles & allowed_roles:
+            return True
+        embed = discord.Embed(description="❌ You don't have permission to use this command.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return False
+    if native_permission is None:
+        return True
+    if getattr(interaction.user.guild_permissions, native_permission, False):
+        return True
+    embed = discord.Embed(description="❌ You don't have permission to use this command.", color=0xff0000)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    return False
 
 @bot.event
 async def on_ready():
@@ -187,11 +212,48 @@ async def on_ready():
     print(f"{bot.user} is online!")
     bot.loop.create_task(tempban_check_loop())
 
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """Quand le bot rejoint un nouveau serveur : crée sa config par défaut et prévient le owner."""
+    get_config(guild.id)  # crée le document de config par défaut pour ce serveur
+    try:
+        owner = guild.owner or await guild.fetch_owner()
+        embed = discord.Embed(
+            title="👋 Thanks for adding Jello Bello!",
+            description=(
+                f"I'm now active on **{guild.name}**. Here's how to get started:\n\n"
+                "• `/config logs <channel>` — set where logs are sent\n"
+                "• `/config autorole <role>` — role given automatically to new members\n"
+                "• `/config allow <command> <role>` / `/config disallow` — let a specific role use a specific command "
+                "(otherwise the default Discord permission is used, e.g. Ban Members for `/ban`) — **server owner only**\n"
+                "• `/config apikey` — generate an API key if you want to use the mobile companion app\n"
+                "• `/botlock` / `/botunlock` — lock/unlock the bot on this server — **server owner only**\n\n"
+                "Most `/config` commands require the **Administrator** permission, except `allow`/`disallow` which are owner-only. Have fun! 🎉"
+            ),
+            color=0x3399ff,
+        )
+        await owner.send(embed=embed)
+    except Exception as e:
+        print(f"on_guild_join welcome DM failed: {e}")
+
+@bot.event
+async def on_guild_remove(guild: discord.Guild):
+    """Quand le bot est retiré d'un serveur : nettoie toutes les données stockées pour ce serveur."""
+    guild_id = str(guild.id)
+    try:
+        config_col.delete_one({"guild_id": guild_id})
+        warns_col.delete_many({"guild_id": guild_id})
+        locked_channels_col.delete_many({"guild_id": guild_id})
+        sanctions_col.delete_many({"guild_id": guild_id})
+        reaction_roles_col.delete_many({"guild_id": guild_id})
+        print(f"Cleaned up data for removed guild {guild_id}")
+    except Exception as e:
+        print(f"on_guild_remove cleanup failed: {e}")
+
 # /ban
 @bot.tree.command(name="ban", description="Ban a member")
-@app_commands.checks.has_permissions(ban_members=True)
 async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "ban", "ban_members"): return
     if member.top_role >= interaction.guild.me.top_role:
         embed = discord.Embed(description="❌ I can't ban this member, their role is too high.", color=0xff0000)
         await interaction.response.send_message(embed=embed)
@@ -211,9 +273,8 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
 
 # /kick
 @bot.tree.command(name="kick", description="Kick a member")
-@app_commands.checks.has_permissions(kick_members=True)
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "kick", "kick_members"): return
     if member.top_role >= interaction.guild.me.top_role:
         embed = discord.Embed(description="❌ I can't kick this member, their role is too high.", color=0xff0000)
         await interaction.response.send_message(embed=embed)
@@ -233,9 +294,8 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
 
 # /mute
 @bot.tree.command(name="mute", description="Timeout a member")
-@app_commands.checks.has_permissions(moderate_members=True)
 async def mute(interaction: discord.Interaction, member: discord.Member, minutes: int = 10, reason: str = "No reason provided"):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "mute", "moderate_members"): return
     if member.top_role >= interaction.guild.me.top_role:
         embed = discord.Embed(description="❌ I can't mute this member, their role is too high.", color=0xff6600)
         await interaction.response.send_message(embed=embed)
@@ -257,9 +317,8 @@ async def mute(interaction: discord.Interaction, member: discord.Member, minutes
 
 # /unmute
 @bot.tree.command(name="unmute", description="Remove timeout from a member")
-@app_commands.checks.has_permissions(moderate_members=True)
 async def unmute(interaction: discord.Interaction, member: discord.Member):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "unmute", "moderate_members"): return
     if member.top_role >= interaction.guild.me.top_role:
         embed = discord.Embed(description="❌ I can't unmute this member, their role is too high.", color=0xff6600)
         await interaction.response.send_message(embed=embed)
@@ -273,9 +332,8 @@ async def unmute(interaction: discord.Interaction, member: discord.Member):
 
 # /unban
 @bot.tree.command(name="unban", description="Unban a user by ID")
-@app_commands.checks.has_permissions(ban_members=True)
 async def unban(interaction: discord.Interaction, user_id: str):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "unban", "ban_members"): return
     try:
         user = await bot.fetch_user(int(user_id))
         await interaction.guild.unban(user)
@@ -290,16 +348,15 @@ async def unban(interaction: discord.Interaction, user_id: str):
 
 # /warn
 @bot.tree.command(name="warn", description="Warn a member")
-@app_commands.checks.has_permissions(manage_messages=True)
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "warn", "manage_messages"): return
     if member.top_role >= interaction.guild.me.top_role:
         embed = discord.Embed(description="❌ I can't warn this member, their role is too high.", color=0xff0000)
         await interaction.response.send_message(embed=embed)
         return
     await interaction.response.defer()
-    count = get_warns(member.id) + 1
-    set_warns(member.id, count)
+    count = get_warns(interaction.guild_id, member.id) + 1
+    set_warns(interaction.guild_id, member.id, count)
     log_sanction(interaction.guild_id, member.id, "warn", reason, interaction.user.id)
     embed = discord.Embed(title="⚠️ Member Warned", color=0xffcc00)
     embed.add_field(name="User", value=f"**{member}**", inline=True)
@@ -311,17 +368,16 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 
 # /unwarn
 @bot.tree.command(name="unwarn", description="Remove a warning from a member")
-@app_commands.checks.has_permissions(manage_messages=True)
 async def unwarn(interaction: discord.Interaction, member: discord.Member):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "unwarn", "manage_messages"): return
     await interaction.response.defer()
-    count = get_warns(member.id)
+    count = get_warns(interaction.guild_id, member.id)
     if count == 0:
         embed = discord.Embed(description=f"❌ **{member}** has no warnings.", color=0xff0000)
         await interaction.followup.send(embed=embed)
         return
     count -= 1
-    set_warns(member.id, count)
+    set_warns(interaction.guild_id, member.id, count)
     embed = discord.Embed(title="✅ Warning Removed", color=0xffcc00)
     embed.add_field(name="User", value=f"**{member}**", inline=True)
     embed.add_field(name="Unwarn by", value=f"**{interaction.user.top_role.name}** · {interaction.user.name}", inline=True)
@@ -332,9 +388,9 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member):
 # /warnings
 @bot.tree.command(name="warnings", description="Check warnings of a member")
 async def warnings(interaction: discord.Interaction, member: discord.Member):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "warnings", None): return
     await interaction.response.defer()
-    count = get_warns(member.id)
+    count = get_warns(interaction.guild_id, member.id)
     embed = discord.Embed(title="📋 Warnings", color=0xffcc00)
     embed.add_field(name="User", value=f"**{member}**", inline=True)
     embed.add_field(name="Total Warnings", value=f"{count}", inline=True)
@@ -349,7 +405,6 @@ async def warnings(interaction: discord.Interaction, member: discord.Member):
     filter_by_role="Only delete messages from members with this role",
     filter_by_bots="Only delete messages sent by bots",
 )
-@app_commands.checks.has_permissions(manage_messages=True)
 async def clear(
     interaction: discord.Interaction,
     amount: int = 10,
@@ -357,7 +412,7 @@ async def clear(
     filter_by_role: discord.Role = None,
     filter_by_bots: bool = False,
 ):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "clear", "manage_messages"): return
 
     def message_check(message):
         if filter_by_user and message.author.id != filter_by_user.id:
@@ -392,7 +447,7 @@ async def clear(
 # /mutelist
 @bot.tree.command(name="mutelist", description="List all muted members")
 async def mutelist(interaction: discord.Interaction):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "mutelist", None): return
     muted = [m for m in interaction.guild.members if m.is_timed_out()]
     if not muted:
         embed = discord.Embed(description="✅ No members are currently muted.", color=0x00cc00)
@@ -406,8 +461,8 @@ async def mutelist(interaction: discord.Interaction):
 
 # /roleadd
 @bot.tree.command(name="roleadd", description="Give a role to a member")
-@has_allowed_role()
 async def roleadd(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+    if not await check_access(interaction, "roleadd", "manage_roles"): return
     if role >= interaction.guild.me.top_role:
         embed = discord.Embed(description="❌ I can't give this role, it's too high.", color=0xff0000)
         await interaction.response.send_message(embed=embed)
@@ -426,8 +481,8 @@ async def roleadd(interaction: discord.Interaction, member: discord.Member, role
 
 # /roleremove
 @bot.tree.command(name="roleremove", description="Remove a role from a member")
-@has_allowed_role()
 async def roleremove(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+    if not await check_access(interaction, "roleremove", "manage_roles"): return
     if role >= interaction.guild.me.top_role:
         embed = discord.Embed(description="❌ I can't remove this role, it's too high.", color=0xff0000)
         await interaction.response.send_message(embed=embed)
@@ -446,9 +501,8 @@ async def roleremove(interaction: discord.Interaction, member: discord.Member, r
 
 # /lock
 @bot.tree.command(name="lock", description="Lock a channel")
-@app_commands.checks.has_permissions(manage_channels=True)
 async def lock(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "lock", "manage_channels"): return
     channel = channel or interaction.channel
     await channel.set_permissions(interaction.guild.default_role, send_messages=False)
     mark_channel_locked(interaction.guild_id, channel.id, channel.name, interaction.user.id)
@@ -459,9 +513,8 @@ async def lock(interaction: discord.Interaction, channel: discord.TextChannel = 
 
 # /unlock
 @bot.tree.command(name="unlock", description="Unlock a channel")
-@app_commands.checks.has_permissions(manage_channels=True)
 async def unlock(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "unlock", "manage_channels"): return
     channel = channel or interaction.channel
     await channel.set_permissions(interaction.guild.default_role, send_messages=True)
     mark_channel_unlocked(interaction.guild_id, channel.id)
@@ -472,9 +525,8 @@ async def unlock(interaction: discord.Interaction, channel: discord.TextChannel 
 
 # /vlock
 @bot.tree.command(name="vlock", description="Lock a voice channel (prevent members from connecting)")
-@app_commands.checks.has_permissions(manage_channels=True)
 async def vlock(interaction: discord.Interaction, channel: discord.VoiceChannel = None):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "vlock", "manage_channels"): return
     channel = channel or (interaction.user.voice.channel if interaction.user.voice else None)
     if channel is None:
         embed = discord.Embed(description="❌ Specify a voice channel or join one first.", color=0xff0000)
@@ -501,9 +553,8 @@ async def vlock(interaction: discord.Interaction, channel: discord.VoiceChannel 
 
 # /vunlock
 @bot.tree.command(name="vunlock", description="Unlock a voice channel")
-@app_commands.checks.has_permissions(manage_channels=True)
 async def vunlock(interaction: discord.Interaction, channel: discord.VoiceChannel = None):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "vunlock", "manage_channels"): return
     channel = channel or (interaction.user.voice.channel if interaction.user.voice else None)
     if channel is None:
         embed = discord.Embed(description="❌ Specify a voice channel or join one first.", color=0xff0000)
@@ -519,7 +570,7 @@ async def vunlock(interaction: discord.Interaction, channel: discord.VoiceChanne
 # /lockedchannels
 @bot.tree.command(name="lockedchannels", description="List all currently locked channels")
 async def lockedchannels(interaction: discord.Interaction):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "lockedchannels", None): return
     locked = get_locked_channels(interaction.guild_id)
     if not locked:
         embed = discord.Embed(description="✅ No channels are currently locked.", color=0x00cc00)
@@ -547,11 +598,10 @@ async def lockedchannels(interaction: discord.Interaction):
 
 # /warnlist
 @bot.tree.command(name="warnlist", description="List all warned members")
-@app_commands.checks.has_permissions(manage_messages=True)
 async def warnlist(interaction: discord.Interaction):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "warnlist", "manage_messages"): return
     await interaction.response.defer()
-    docs = warns_col.find({"count": {"$gt": 0}})
+    docs = warns_col.find({"guild_id": str(interaction.guild_id), "count": {"$gt": 0}})
     warned = list(docs)
     if not warned:
         embed = discord.Embed(description="✅ No members have warnings.", color=0x00cc00)
@@ -579,7 +629,7 @@ SANCTION_ICONS = {
 
 @bot.tree.command(name="history", description="Show moderation history for a member")
 async def history(interaction: discord.Interaction, member: discord.Member):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "history", None): return
     await interaction.response.defer()
     records = get_sanction_history(interaction.guild_id, member.id)
     if not records:
@@ -614,9 +664,8 @@ async def history(interaction: discord.Interaction, member: discord.Member):
 
 # /banlist
 @bot.tree.command(name="banlist", description="List all banned members")
-@app_commands.checks.has_permissions(ban_members=True)
 async def banlist(interaction: discord.Interaction):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "banlist", "ban_members"): return
     await interaction.response.defer()
     bans = [entry async for entry in interaction.guild.bans()]
     if not bans:
@@ -630,9 +679,8 @@ async def banlist(interaction: discord.Interaction):
 
 # /broadcast
 @bot.tree.command(name="broadcast", description="Send a broadcast message")
-@app_commands.checks.has_permissions(manage_messages=True)
 async def broadcast(interaction: discord.Interaction, message: str, mention: str = "none"):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "broadcast", "manage_messages"): return
     if mention == "everyone":
         ping = "@everyone"
     elif mention == "here":
@@ -646,166 +694,94 @@ async def broadcast(interaction: discord.Interaction, message: str, mention: str
     await interaction.response.send_message(embed=confirm, ephemeral=True)
     await interaction.channel.send(content=ping if ping else None, embed=embed)
 
-# /safemode
-class SafeModeView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=60)
+# ============================================================
+# =======================  CONFIG  ===========================
+# ============================================================
 
-    @discord.ui.button(label="✅ Give Roles", style=discord.ButtonStyle.green)
-    async def give_roles(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cfg = get_config(interaction.guild_id)
-        roles = [interaction.guild.get_role(r) for r in cfg.get("safe_roles", []) if interaction.guild.get_role(r)]
-        if roles:
-            await interaction.user.add_roles(*roles)
-        embed = discord.Embed(title="✅ Roles Given", description=" ".join(r.mention for r in roles), color=0x00cc00)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="🔒 Lock Bot", style=discord.ButtonStyle.red)
-    async def lock_bot(self, interaction: discord.Interaction, button: discord.ui.Button):
-        bot.locked = True
-        embed = discord.Embed(title="🔒 Bot Locked", description="Bot is now locked for everyone except the owner.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="🔓 Unlock Bot", style=discord.ButtonStyle.green)
-    async def unlock_bot(self, interaction: discord.Interaction, button: discord.ui.Button):
-        bot.locked = False
-        embed = discord.Embed(title="🔓 Bot Unlocked", description="Bot is now unlocked for everyone.", color=0x00cc00)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="safemode", description="Owner only")
-async def safemode(interaction: discord.Interaction, password: str):
-    if interaction.user.id != OWNER_ID:
-        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    cfg = get_config(interaction.guild_id)
-    if password != cfg.get("safe_password", "Digravina@21"):
-        embed_public = discord.Embed(description=f"❌ **{interaction.user}** tried to use safemode with a wrong password.", color=0xff0000)
-        await interaction.response.send_message(embed=embed_public)
-        try:
-            embed_dm = discord.Embed(title="⚠️ Safemode Alert", description=f"**{interaction.user}** (`{interaction.user.id}`) tried to use `/safemode` with a wrong password.", color=0xff0000)
-            owner = await bot.fetch_user(OWNER_ID)
-            await owner.send(embed=embed_dm)
-        except:
-            pass
-        return
-    embed = discord.Embed(title="🔐 Safe Mode", description="Choose an action:", color=0x3399ff)
-    await interaction.response.send_message(embed=embed, view=SafeModeView(), ephemeral=True)
-
-# /config
-config_group = app_commands.Group(name="config", description="Configure the bot (owner only)")
-
-@config_group.command(name="unlock", description="Unlock config for 15 minutes")
-async def config_unlock(interaction: discord.Interaction, password: str):
-    if interaction.user.id != OWNER_ID:
-        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    cfg = get_config(interaction.guild_id)
-    if password != cfg.get("safe_password", "Digravina@21"):
-        embed = discord.Embed(description="❌ Wrong password.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    bot.config_unlocked[interaction.guild_id] = time.time()
-    embed = discord.Embed(title="🔓 Config Unlocked", description="Config is unlocked for 15 minutes.", color=0x00cc00)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+config_group = app_commands.Group(name="config", description="Configure the bot (Administrator only)")
 
 @config_group.command(name="logs", description="Set the logs channel")
+@has_admin()
 async def config_logs(interaction: discord.Interaction, channel: discord.TextChannel):
-    if interaction.user.id != OWNER_ID:
-        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    if not is_config_unlocked(interaction.guild_id):
-        embed = discord.Embed(description="🔒 Use `/config unlock` first.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
     update_config(interaction.guild_id, "logs_channel", channel.name)
     embed = discord.Embed(title="✅ Logs Channel Updated", description=f"Logs will now be sent to {channel.mention}", color=0x00cc00)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @config_group.command(name="autorole", description="Set the auto-join role")
+@has_admin()
 async def config_autorole(interaction: discord.Interaction, role: discord.Role):
-    if interaction.user.id != OWNER_ID:
-        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    if not is_config_unlocked(interaction.guild_id):
-        embed = discord.Embed(description="🔒 Use `/config unlock` first.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
     update_config(interaction.guild_id, "autorole", role.id)
     embed = discord.Embed(title="✅ Auto-Role Updated", description=f"New members will get {role.mention}", color=0x00cc00)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@config_group.command(name="allowedroles", description="Set allowed roles for roleadd/roleremove (up to 3)")
-async def config_allowedroles(interaction: discord.Interaction, role1: discord.Role, role2: discord.Role = None, role3: discord.Role = None):
-    if interaction.user.id != OWNER_ID:
-        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    if not is_config_unlocked(interaction.guild_id):
-        embed = discord.Embed(description="🔒 Use `/config unlock` first.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    roles = [r.id for r in [role1, role2, role3] if r]
-    update_config(interaction.guild_id, "allowed_roles", roles)
-    mentions = " ".join(r.mention for r in [role1, role2, role3] if r)
-    embed = discord.Embed(title="✅ Allowed Roles Updated", description=mentions, color=0x00cc00)
+@config_group.command(name="allow", description="Allow a role to use a specific command (e.g. ban, kick, roleadd) — server owner only")
+@app_commands.describe(command="Command name, without the slash (e.g. ban)", role="Role allowed to use it")
+@has_owner()
+async def config_allow(interaction: discord.Interaction, command: str, role: discord.Role):
+    command = command.strip().lower().lstrip("/")
+    add_command_role(interaction.guild_id, command, role.id)
+    embed = discord.Embed(title="✅ Permission Added", description=f"{role.mention} can now use `/{command}`.", color=0x00cc00)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@config_group.command(name="saferoles", description="Set roles given by safemode (up to 3)")
-async def config_saferoles(interaction: discord.Interaction, role1: discord.Role, role2: discord.Role = None, role3: discord.Role = None):
-    if interaction.user.id != OWNER_ID:
-        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    if not is_config_unlocked(interaction.guild_id):
-        embed = discord.Embed(description="🔒 Use `/config unlock` first.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    roles = [r.id for r in [role1, role2, role3] if r]
-    update_config(interaction.guild_id, "safe_roles", roles)
-    mentions = " ".join(r.mention for r in [role1, role2, role3] if r)
-    embed = discord.Embed(title="✅ Safe Roles Updated", description=mentions, color=0x00cc00)
+@config_group.command(name="disallow", description="Remove a role's permission for a specific command — server owner only")
+@app_commands.describe(command="Command name, without the slash (e.g. ban)", role="Role to remove")
+@has_owner()
+async def config_disallow(interaction: discord.Interaction, command: str, role: discord.Role):
+    command = command.strip().lower().lstrip("/")
+    remove_command_role(interaction.guild_id, command, role.id)
+    embed = discord.Embed(title="✅ Permission Removed", description=f"{role.mention} can no longer use `/{command}` (falls back to default Discord permissions).", color=0x00cc00)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@config_group.command(name="safepassword", description="Change the safemode password")
-async def config_safepassword(interaction: discord.Interaction, new_password: str):
-    if interaction.user.id != OWNER_ID:
-        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    if not is_config_unlocked(interaction.guild_id):
-        embed = discord.Embed(description="🔒 Use `/config unlock` first.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    update_config(interaction.guild_id, "safe_password", new_password)
-    embed = discord.Embed(title="✅ Password Updated", description="Safemode password has been changed.", color=0x00cc00)
+@config_group.command(name="apikey", description="Generate a new API key for this server's mobile app access")
+@has_admin()
+async def config_apikey(interaction: discord.Interaction):
+    new_key = secrets.token_hex(16)
+    update_config(interaction.guild_id, "api_key", new_key)
+    embed = discord.Embed(
+        title="🔑 New API Key Generated",
+        description=f"||{new_key}||\n\nUse this in the mobile app to manage **this server only**. Keep it secret — generating a new one invalidates the old one.",
+        color=0x00cc00,
+    )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @config_group.command(name="view", description="View current config")
+@has_admin()
 async def config_view(interaction: discord.Interaction):
-    if interaction.user.id != OWNER_ID:
-        embed = discord.Embed(description="❌ You don't have permission.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    if not is_config_unlocked(interaction.guild_id):
-        embed = discord.Embed(description="🔒 Use `/config unlock` first.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
     cfg = get_config(interaction.guild_id)
-    allowed = [f"<@&{r}>" for r in cfg.get("allowed_roles", [])]
-    safe = [f"<@&{r}>" for r in cfg.get("safe_roles", [])]
     autorole = f"<@&{cfg['autorole']}>" if cfg.get("autorole") else "None"
     embed = discord.Embed(title="⚙️ Server Config", color=0x3399ff)
     embed.add_field(name="Logs Channel", value=f"#{cfg.get('logs_channel', 'logs')}", inline=True)
     embed.add_field(name="Auto-Role", value=autorole, inline=True)
-    embed.add_field(name="Allowed Roles", value=" ".join(allowed) or "None", inline=False)
-    embed.add_field(name="Safe Roles", value=" ".join(safe) or "None", inline=False)
+    embed.add_field(name="API Key", value="✅ Set (use `/config apikey` to regenerate)" if cfg.get("api_key") else "❌ Not set — use `/config apikey` to generate one", inline=True)
+    embed.add_field(name="Locked", value="🔒 Yes" if interaction.guild_id in bot.locked_guilds else "🔓 No", inline=True)
+    command_roles = cfg.get("command_roles", {})
+    if command_roles:
+        lines = []
+        for cmd, roles in command_roles.items():
+            if not roles:
+                continue
+            mentions = " ".join(f"<@&{r}>" for r in roles)
+            lines.append(f"**/{cmd}** → {mentions}")
+        embed.add_field(name="Command Permissions", value="\n".join(lines) or "None configured", inline=False)
+    else:
+        embed.add_field(name="Command Permissions", value="None configured (using default Discord permissions)", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 bot.tree.add_command(config_group)
+
+@bot.tree.command(name="botlock", description="Lock the bot on this server (server owner only)")
+@has_owner()
+async def botlock(interaction: discord.Interaction):
+    bot.locked_guilds.add(interaction.guild_id)
+    embed = discord.Embed(description="🔒 Bot locked on this server. Only the server owner can use commands until `/botunlock`.", color=0xff0000)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="botunlock", description="Unlock the bot on this server (server owner only)")
+@has_owner()
+async def botunlock(interaction: discord.Interaction):
+    bot.locked_guilds.discard(interaction.guild_id)
+    embed = discord.Embed(description="🔓 Bot unlocked on this server.", color=0x00cc00)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ============================================================
 # ===========  USERINFO / SERVERINFO / TEMPBAN / REACTION ROLES
@@ -862,7 +838,7 @@ async def userinfo(interaction: discord.Interaction, member: discord.Member = No
         discord.Status.offline: "⚫ Offline",
     }
     status = status_icons.get(member.status, "⚫ Offline")
-    warn_count = get_warns(member.id)
+    warn_count = get_warns(interaction.guild_id, member.id)
     embed = discord.Embed(title=f"👤 {member}", color=member.color if member.color.value else 0x3399ff)
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="ID", value=str(member.id), inline=True)
@@ -900,10 +876,9 @@ async def serverinfo(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="tempban", description="Temporarily ban a member")
-@app_commands.checks.has_permissions(ban_members=True)
 @app_commands.describe(duration="Duration: 30m, 2h, 1d, 1w")
 async def tempban(interaction: discord.Interaction, member: discord.Member, duration: str, reason: str = "No reason provided"):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "tempban", "ban_members"): return
     if member.top_role >= interaction.guild.me.top_role:
         embed = discord.Embed(description="❌ I can't ban this member, their role is too high.", color=0xff0000)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -932,14 +907,13 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, dura
 
 
 @bot.tree.command(name="reactionrole", description="Create a reaction role message")
-@app_commands.checks.has_permissions(manage_roles=True)
 @app_commands.describe(
     title="Title of the embed",
     channel="Channel where to post the embed",
     pairs="Emoji/role pairs separated by commas, e.g: 🎮 Gamer, 🎵 Music, 🎨 Art"
 )
 async def reactionrole(interaction: discord.Interaction, title: str, channel: discord.TextChannel, pairs: str):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "reactionrole", "manage_roles"): return
     await interaction.response.defer(ephemeral=True)
 
     # Parse les paires emoji/rôle depuis la string
@@ -1017,7 +991,7 @@ class ApplicationModal(discord.ui.Modal):
         await interaction.response.send_message(
             "✅ Your application has been submitted! You'll be notified of the decision.", ephemeral=True
         )
-        owner = await interaction.client.fetch_user(OWNER_ID)
+        owner = interaction.guild.owner or await interaction.guild.fetch_owner()
         embed = discord.Embed(title=f"📋 New Application — {self.role.name}", color=0x3399ff)
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
         embed.add_field(name="Applicant", value=f"{interaction.user.mention} ({interaction.user})", inline=False)
@@ -1098,7 +1072,7 @@ class ApplicationDecisionView(discord.ui.View):
 @bot.tree.command(name="apply", description="Apply for a role")
 @app_commands.describe(role="The role you want to apply for")
 async def apply(interaction: discord.Interaction, role: discord.Role):
-    if not await check_locked(interaction): return
+    if not await check_access(interaction, "apply", None): return
     await interaction.response.send_modal(ApplicationModal(role=role))
 
 # ============================================================
@@ -1406,7 +1380,7 @@ async def play_autocomplete(interaction: discord.Interaction, current: str):
 @bot.tree.command(name="play", description="Play a song from YouTube, Spotify or SoundCloud")
 @app_commands.autocomplete(query=play_autocomplete)
 async def play(interaction: discord.Interaction, query: str):
-    if not await check_locked(interaction):
+    if not await check_access(interaction, "play", None):
         return
 
     await interaction.response.defer()
@@ -1505,7 +1479,7 @@ class SearchResultView(discord.ui.View):
 
 @bot.tree.command(name="search", description="Search for a song and choose from a list of results")
 async def search(interaction: discord.Interaction, query: str):
-    if not await check_locked(interaction):
+    if not await check_access(interaction, "search", None):
         return
 
     await interaction.response.defer()
@@ -1538,7 +1512,7 @@ async def search(interaction: discord.Interaction, query: str):
 
 @bot.tree.command(name="pause", description="Pause the current song")
 async def pause(interaction: discord.Interaction):
-    if not await check_locked(interaction):
+    if not await check_access(interaction, "pause", None):
         return
     state = get_music_state(interaction.guild_id)
     if state.voice_client and state.voice_client.is_playing():
@@ -1552,7 +1526,7 @@ async def pause(interaction: discord.Interaction):
 
 @bot.tree.command(name="resume", description="Resume the paused song")
 async def resume(interaction: discord.Interaction):
-    if not await check_locked(interaction):
+    if not await check_access(interaction, "resume", None):
         return
     state = get_music_state(interaction.guild_id)
     if state.voice_client and state.voice_client.is_paused():
@@ -1566,7 +1540,7 @@ async def resume(interaction: discord.Interaction):
 
 @bot.tree.command(name="skip", description="Skip the current song")
 async def skip(interaction: discord.Interaction):
-    if not await check_locked(interaction):
+    if not await check_access(interaction, "skip", None):
         return
     state = get_music_state(interaction.guild_id)
     if state.voice_client and (state.voice_client.is_playing() or state.voice_client.is_paused()):
@@ -1580,7 +1554,7 @@ async def skip(interaction: discord.Interaction):
 
 @bot.tree.command(name="volume", description="Set the playback volume (0 to 200%)")
 async def volume(interaction: discord.Interaction, percent: app_commands.Range[int, 0, 200]):
-    if not await check_locked(interaction):
+    if not await check_access(interaction, "volume", None):
         return
     state = get_music_state(interaction.guild_id)
     state.volume = percent / 100.0
@@ -1600,7 +1574,7 @@ async def volume(interaction: discord.Interaction, percent: app_commands.Range[i
 
 @bot.tree.command(name="stop", description="Stop playback and clear the queue")
 async def stop(interaction: discord.Interaction):
-    if not await check_locked(interaction):
+    if not await check_access(interaction, "stop", None):
         return
     state = get_music_state(interaction.guild_id)
     # Nettoie les fichiers mp3 des morceaux encore en attente (espace disque limité sur Render)
@@ -1655,17 +1629,20 @@ async def queue_cmd(interaction: discord.Interaction):
 # Pas besoin de persister ça en DB : ça repart à zéro si le bot redémarre, ce qui est très bien.
 _recent_messages = {}  # {(guild_id, user_id): [timestamps]}
 
+# Suivi en mémoire des arrivées récentes par serveur, pour la détection de raid.
+_recent_joins = {}  # {guild_id: [timestamps]}
+
 SPAM_MESSAGE_COUNT = 10
 SPAM_WINDOW_SECONDS = 5
 CAPS_MIN_LENGTH = 10
 CAPS_RATIO_THRESHOLD = 0.7
 INVITE_LINK_RE = re.compile(r"(discord\.gg/|discord(?:app)?\.com/invite/)", re.IGNORECASE)
+RAID_JOIN_COUNT = 5
+RAID_WINDOW_SECONDS = 10
 
 
 def is_automod_exempt(member, cfg):
-    """Les modérateurs (rôles autorisés, permission gérer les messages, owner) ne sont jamais auto-modérés."""
-    if member.id == OWNER_ID:
-        return True
+    """Les modérateurs (rôles autorisés ou permission gérer les messages) ne sont jamais auto-modérés."""
     if member.guild_permissions.manage_messages:
         return True
     allowed = set(cfg.get("allowed_roles", []))
@@ -1683,6 +1660,18 @@ def check_spam(guild_id, user_id):
     timestamps.append(now)
     _recent_messages[key] = timestamps
     return len(timestamps) > SPAM_MESSAGE_COUNT
+
+
+def check_raid(guild_id):
+    """Retourne True si RAID_JOIN_COUNT membres ont rejoint en moins de RAID_WINDOW_SECONDS."""
+    now = time.time()
+    timestamps = _recent_joins.get(guild_id, [])
+    timestamps = [t for t in timestamps if now - t < RAID_WINDOW_SECONDS]
+    timestamps.append(now)
+    _recent_joins[guild_id] = timestamps
+    return len(timestamps) >= RAID_JOIN_COUNT
+
+
 
 
 def check_caps(content):
@@ -1704,8 +1693,8 @@ async def apply_automod_action(message, violation_type, reason):
     except Exception as e:
         print(f"AutoMod: failed to delete message: {e}")
 
-    count = get_warns(message.author.id) + 1
-    set_warns(message.author.id, count)
+    count = get_warns(message.guild.id, message.author.id) + 1
+    set_warns(message.guild.id, message.author.id, count)
     log_sanction(message.guild.id, message.author.id, violation_type, reason, "automod")
 
     warning_embed = discord.Embed(
@@ -1769,6 +1758,26 @@ async def on_member_join(member):
         embed.add_field(name="User", value=f"**{member}**", inline=True)
         embed.set_thumbnail(url=member.display_avatar.url)
         await channel.send(embed=embed)
+
+    # Anti-raid : si RAID_JOIN_COUNT membres rejoignent en moins de RAID_WINDOW_SECONDS, on lock le serveur.
+    if check_raid(member.guild.id) and member.guild.id not in bot.locked_guilds:
+        bot.locked_guilds.add(member.guild.id)
+        alert = discord.Embed(
+            title="🚨 Raid Detected",
+            description=(
+                f"{RAID_JOIN_COUNT}+ members joined **{member.guild.name}** in under {RAID_WINDOW_SECONDS} seconds.\n"
+                "The server has been **automatically locked** — most commands now require Administrator until it's unlocked.\n\n"
+                f"Use `/botunlock` (server owner only) or the mobile app to unlock once it's safe."
+            ),
+            color=0xff0000,
+        )
+        if channel:
+            await channel.send(embed=alert)
+        try:
+            owner = member.guild.owner or await member.guild.fetch_owner()
+            await owner.send(embed=alert)
+        except Exception as e:
+            print(f"Anti-raid owner DM failed: {e}")
 
 @bot.event
 async def on_member_remove(member):
@@ -1856,15 +1865,24 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
 api = Flask('')
 
 def require_api_key(f):
-    """Décorateur : vérifie le header X-API-Key sur chaque requête protégée."""
+    """Décorateur : vérifie le header X-API-Key sur chaque requête protégée.
+    Deux clés sont acceptées :
+    - la clé "maîtresse" définie dans la variable d'env API_KEY sur Render (accès à tous les serveurs)
+    - la clé propre à UN serveur, générée via /config apikey (accès à ce serveur uniquement)
+    """
     @wraps(f)
     def wrapper(*args, **kwargs):
-        if not API_KEY:
-            return jsonify({"error": "API_KEY not configured on server"}), 500
         key = request.headers.get("X-API-Key")
-        if key != API_KEY:
-            return jsonify({"error": "Unauthorized"}), 401
-        return f(*args, **kwargs)
+        if not key:
+            return jsonify({"error": "Missing X-API-Key header"}), 401
+        if API_KEY and key == API_KEY:
+            return f(*args, **kwargs)
+        guild_id = kwargs.get("guild_id")
+        if guild_id:
+            cfg = get_config(guild_id)
+            if cfg.get("api_key") and key == cfg["api_key"]:
+                return f(*args, **kwargs)
+        return jsonify({"error": "Unauthorized"}), 401
     return wrapper
 
 def run_coroutine(coro, timeout=10):
@@ -1875,11 +1893,10 @@ def run_coroutine(coro, timeout=10):
     future = asyncio.run_coroutine_threadsafe(coro, bot.loop)
     return future.result(timeout=timeout)
 
-MOBILE_APP_LOG_CHANNEL_ID = 1471790589694578914
-
 async def _send_log_embed(guild, embed):
-    """Envoie un embed dans le channel fixe dédié aux logs de l'app mobile."""
-    channel = guild.get_channel(MOBILE_APP_LOG_CHANNEL_ID)
+    """Envoie un embed dans le channel de logs configuré pour ce serveur."""
+    cfg = get_config(guild.id)
+    channel = discord.utils.get(guild.text_channels, name=cfg.get("logs_channel", "logs"))
     if channel:
         await channel.send(embed=embed)
 
@@ -1941,7 +1958,7 @@ def home():
 def health():
     return jsonify({
         "online": bot.is_ready(),
-        "locked": bot.locked,
+        "locked_guilds": [str(g) for g in bot.locked_guilds],
         "guild_count": len(bot.guilds) if bot.is_ready() else 0
     })
 
@@ -1972,7 +1989,7 @@ def guild_stats(guild_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    warned_count = warns_col.count_documents({"count": {"$gt": 0}})
+    warned_count = warns_col.count_documents({"guild_id": str(guild_id), "count": {"$gt": 0}})
 
     return jsonify({
         "guild_id": str(guild.id),
@@ -1981,7 +1998,7 @@ def guild_stats(guild_id):
         "ban_count": ban_count,
         "muted_count": muted_count,
         "warned_count": warned_count,
-        "locked": bot.locked
+        "locked": int(guild_id) in bot.locked_guilds
     })
 
 @api.route('/api/guilds/<guild_id>/config', methods=['GET'])
@@ -1989,7 +2006,7 @@ def guild_stats(guild_id):
 def get_guild_config(guild_id):
     cfg = get_config(guild_id)
     cfg.pop("_id", None)
-    cfg.pop("safe_password", None)  # on ne renvoie jamais le mdp en clair
+    cfg.pop("api_key", None)  # jamais renvoyée en clair
     return jsonify(cfg)
 
 @api.route('/api/guilds/<guild_id>/config', methods=['POST'])
@@ -2002,7 +2019,7 @@ def update_guild_config(guild_id):
         return jsonify({"error": "Guild not found"}), 404
 
     data = request.get_json(silent=True) or {}
-    allowed_keys = {"logs_channel", "autorole", "allowed_roles", "safe_roles", "safe_password"}
+    allowed_keys = {"logs_channel", "autorole", "allowed_roles", "command_roles"}
     updated = {}
     for key, value in data.items():
         if key in allowed_keys:
@@ -2016,13 +2033,13 @@ def update_guild_config(guild_id):
 @api.route('/api/guilds/<guild_id>/lock', methods=['POST'])
 @require_api_key
 def lock_bot_route(guild_id):
-    bot.locked = True
+    bot.locked_guilds.add(int(guild_id))
     return jsonify({"success": True, "locked": True})
 
 @api.route('/api/guilds/<guild_id>/unlock', methods=['POST'])
 @require_api_key
 def unlock_bot_route(guild_id):
-    bot.locked = False
+    bot.locked_guilds.discard(int(guild_id))
     return jsonify({"success": True, "locked": False})
 
 @api.route('/api/guilds/<guild_id>/broadcast', methods=['POST'])
@@ -2134,13 +2151,13 @@ def kick_member_route(guild_id, user_id):
 @api.route('/api/guilds/<guild_id>/members/<user_id>/warnings', methods=['GET'])
 @require_api_key
 def get_warnings_route(guild_id, user_id):
-    count = get_warns(user_id)
+    count = get_warns(guild_id, user_id)
     return jsonify({"user_id": user_id, "warnings": count})
 
 @api.route('/api/guilds/<guild_id>/warnlist', methods=['GET'])
 @require_api_key
 def warnlist_route(guild_id):
-    docs = list(warns_col.find({"count": {"$gt": 0}}))
+    docs = list(warns_col.find({"guild_id": str(guild_id), "count": {"$gt": 0}}))
     result = [{"user_id": d["user_id"], "count": d["count"]} for d in docs]
     return jsonify(result)
 
@@ -2262,8 +2279,8 @@ def warn_member_route(guild_id, user_id):
     if not member:
         return jsonify({"error": "Member not found"}), 404
 
-    count = get_warns(user_id) + 1
-    set_warns(user_id, count)
+    count = get_warns(guild_id, user_id) + 1
+    set_warns(guild_id, user_id, count)
     log_sanction(guild_id, user_id, "warn", reason, "mobile_app")
 
     try:
@@ -2276,11 +2293,11 @@ def warn_member_route(guild_id, user_id):
 @api.route('/api/guilds/<guild_id>/members/<user_id>/unwarn', methods=['POST'])
 @require_api_key
 def unwarn_member_route(guild_id, user_id):
-    count = get_warns(user_id)
+    count = get_warns(guild_id, user_id)
     if count == 0:
         return jsonify({"error": "No warnings to remove"}), 400
     count -= 1
-    set_warns(user_id, count)
+    set_warns(guild_id, user_id, count)
 
     if bot.is_ready():
         guild = bot.get_guild(int(guild_id))
