@@ -182,7 +182,7 @@ async def check_access(interaction: discord.Interaction, command_name: str, nati
     """
     if interaction.guild_id in bot.locked_guilds and not interaction.user.guild_permissions.administrator:
         embed = discord.Embed(description="🔒 The bot is currently locked on this server.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed)
         return False
     if interaction.user.guild_permissions.administrator:
         return True
@@ -193,14 +193,14 @@ async def check_access(interaction: discord.Interaction, command_name: str, nati
         if user_roles & allowed_roles:
             return True
         embed = discord.Embed(description="❌ You don't have permission to use this command.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed)
         return False
     if native_permission is None:
         return True
     if getattr(interaction.user.guild_permissions, native_permission, False):
         return True
     embed = discord.Embed(description="❌ You don't have permission to use this command.", color=0xff0000)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed)
     return False
 
 @bot.event
@@ -1063,14 +1063,14 @@ async def help_command(interaction: discord.Interaction):
         inline=False,
     )
     embed.set_footer(text="Full documentation on GitHub")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="ping", description="Check the bot's latency")
 async def ping(interaction: discord.Interaction):
     latency_ms = round(bot.latency * 1000)
     embed = discord.Embed(description=f"🏓 Pong! `{latency_ms}ms`", color=0x00cc00)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="botinfo", description="Show information about the bot")
