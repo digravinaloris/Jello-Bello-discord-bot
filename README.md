@@ -4,7 +4,7 @@ A full-featured Discord moderation & utility bot — auto-moderation, anti-raid 
 
 Built with Python (discord.py) + Flask, backed by MongoDB Atlas, hosted on Render.
 
-**[➕ Invite Jello Bello to your server](https://discord.com/api/oauth2/authorize?client_id=1510263826455466004&permissions=1099917519958&scope=bot%20applications.commands)**
+**[➕ Invite Jello Bello to your server](https://discord.com/oauth2/authorize?client_id=1510263826455466004)**
 
 ---
 
