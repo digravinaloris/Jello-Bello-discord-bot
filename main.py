@@ -23,9 +23,10 @@ config_col = None
 locked_channels_col = None
 sanctions_col = None
 reaction_roles_col = None
+notes_col = None
 
 def init_mongo():
-    global mongo, db, warns_col, config_col, locked_channels_col, sanctions_col, reaction_roles_col
+    global mongo, db, warns_col, config_col, locked_channels_col, sanctions_col, reaction_roles_col, notes_col
     mongo = MongoClient(os.getenv("MONGO_URI"), serverSelectionTimeoutMS=5000)
     db = mongo["discordbot"]
     warns_col = db["warns"]
@@ -33,6 +34,7 @@ def init_mongo():
     locked_channels_col = db["locked_channels"]
     sanctions_col = db["sanctions"]
     reaction_roles_col = db["reaction_roles"]
+    notes_col = db["notes"]
 
 def get_config(guild_id):
     doc = config_col.find_one({"guild_id": str(guild_id)})
@@ -146,6 +148,7 @@ def get_active_tempbans():
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.locked_guilds = set()  # {guild_id, ...} — serveurs actuellement verrouillés (par serveur, pas global)
+bot.start_time = time.time()
 bot.ready_event = None  # set in on_ready, used so Flask waits until bot is ready
 
 API_KEY = os.getenv("API_KEY")  # clé secrète pour protéger l'API, à définir sur Render
@@ -246,6 +249,7 @@ async def on_guild_remove(guild: discord.Guild):
         locked_channels_col.delete_many({"guild_id": guild_id})
         sanctions_col.delete_many({"guild_id": guild_id})
         reaction_roles_col.delete_many({"guild_id": guild_id})
+        notes_col.delete_many({"guild_id": guild_id})
         print(f"Cleaned up data for removed guild {guild_id}")
     except Exception as e:
         print(f"on_guild_remove cleanup failed: {e}")
@@ -596,7 +600,77 @@ async def lockedchannels(interaction: discord.Interaction):
         )
     await interaction.response.send_message(embed=embed)
 
-# /warnlist
+
+@bot.tree.command(name="slowmode", description="Set slowmode delay on a channel")
+@app_commands.describe(channel="The channel to apply slowmode to", seconds="Delay in seconds (0 to disable, max 21600)")
+async def slowmode(interaction: discord.Interaction, channel: discord.TextChannel, seconds: int):
+    if not await check_access(interaction, "slowmode", "manage_channels"): return
+    seconds = max(0, min(seconds, 21600))
+    await channel.edit(slowmode_delay=seconds)
+    if seconds == 0:
+        embed = discord.Embed(description=f"✅ Slowmode disabled in {channel.mention}.", color=0x00cc00)
+    else:
+        embed = discord.Embed(description=f"✅ Slowmode set to **{seconds}s** in {channel.mention}.", color=0x00cc00)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="nickname", description="Change a member's nickname")
+@app_commands.describe(member="The member to rename", nickname="New nickname (leave empty to reset)")
+async def nickname(interaction: discord.Interaction, member: discord.Member, nickname: str = None):
+    if not await check_access(interaction, "nickname", "manage_nicknames"): return
+    if member.top_role >= interaction.guild.me.top_role:
+        embed = discord.Embed(description="❌ I can't rename this member, their role is too high.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    try:
+        await member.edit(nick=nickname)
+    except Exception as e:
+        embed = discord.Embed(description=f"❌ Error: {e}", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    if nickname:
+        embed = discord.Embed(description=f"✅ {member.mention}'s nickname changed to **{nickname}**.", color=0x00cc00)
+    else:
+        embed = discord.Embed(description=f"✅ {member.mention}'s nickname reset.", color=0x00cc00)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="groupnickname", description="Add or remove a prefix on the nickname of every member with a role")
+@app_commands.describe(role="The role to target", prefix="The prefix to add (e.g. '[EVENT] ')", remove="Remove this prefix instead of adding it")
+async def groupnickname(interaction: discord.Interaction, role: discord.Role, prefix: str, remove: bool = False):
+    if not await check_access(interaction, "groupnickname", "manage_nicknames"): return
+    if role >= interaction.guild.me.top_role:
+        embed = discord.Embed(description="❌ I can't manage nicknames for this role, it's too high.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    await interaction.response.defer()
+    updated, skipped = 0, 0
+    for member in role.members:
+        if member.top_role >= interaction.guild.me.top_role:
+            skipped += 1
+            continue
+        current = member.nick or member.name
+        try:
+            if remove:
+                if current.startswith(prefix):
+                    new_nick = current[len(prefix):] or None
+                    await member.edit(nick=new_nick)
+                    updated += 1
+            else:
+                if not current.startswith(prefix):
+                    new_nick = (prefix + current)[:32]
+                    await member.edit(nick=new_nick)
+                    updated += 1
+        except Exception:
+            skipped += 1
+    action = "removed from" if remove else "added to"
+    embed = discord.Embed(
+        description=f"✅ Prefix **{action}** {updated} member(s) with {role.mention}." + (f" ({skipped} skipped)" if skipped else ""),
+        color=0x00cc00,
+    )
+    await interaction.followup.send(embed=embed)
+
+
 @bot.tree.command(name="warnlist", description="List all warned members")
 async def warnlist(interaction: discord.Interaction):
     if not await check_access(interaction, "warnlist", "manage_messages"): return
@@ -622,6 +696,8 @@ SANCTION_ICONS = {
     "kick": "👢",
     "mute": "🔇",
     "warn": "⚠️",
+    "softban": "🧹",
+    "note": "📝",
     "automod_spam": "🤖",
     "automod_link": "🔗",
     "automod_caps": "🔠",
@@ -661,6 +737,84 @@ async def history(interaction: discord.Interaction, member: discord.Member):
     if len(records) >= 15:
         embed.set_footer(text="Showing the 15 most recent sanctions")
     await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="note", description="Add an internal staff note on a member (not visible to them)")
+@app_commands.describe(member="The member to note", text="The note content")
+async def note(interaction: discord.Interaction, member: discord.Member, text: str):
+    if not await check_access(interaction, "note", "manage_messages"): return
+    notes_col.insert_one({
+        "guild_id": str(interaction.guild_id),
+        "user_id": str(member.id),
+        "text": text,
+        "moderator_id": str(interaction.user.id),
+        "timestamp": datetime.datetime.utcnow(),
+    })
+    log_sanction(interaction.guild_id, member.id, "note", text, interaction.user.id)
+    embed = discord.Embed(description=f"📝 Note added for **{member}**.", color=0x3399ff)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="notes", description="View internal staff notes for a member")
+@app_commands.describe(member="The member whose notes to view")
+async def notes(interaction: discord.Interaction, member: discord.Member):
+    if not await check_access(interaction, "notes", "manage_messages"): return
+    docs = list(notes_col.find({"guild_id": str(interaction.guild_id), "user_id": str(member.id)}).sort("timestamp", -1).limit(15))
+    if not docs:
+        embed = discord.Embed(description=f"✅ No notes for **{member}**.", color=0x00cc00)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    embed = discord.Embed(title=f"📝 Notes — {member}", color=0x3399ff)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    for doc in docs:
+        date_str = doc["timestamp"].strftime("%Y-%m-%d %H:%M UTC")
+        try:
+            mod = await bot.fetch_user(int(doc["moderator_id"]))
+            mod_str = str(mod)
+        except Exception:
+            mod_str = f"ID {doc['moderator_id']}"
+        embed.add_field(name=f"{date_str} — by {mod_str}", value=doc["text"], inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="softban", description="Kick a member and delete their recent messages")
+@app_commands.describe(member="The member to softban", reason="Reason", delete_days="Days of messages to delete (0-7)")
+async def softban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided", delete_days: int = 1):
+    if not await check_access(interaction, "softban", "ban_members"): return
+    if member.top_role >= interaction.guild.me.top_role:
+        embed = discord.Embed(description="❌ I can't softban this member, their role is too high.", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    delete_days = max(0, min(delete_days, 7))
+    try:
+        await member.ban(reason=f"[Softban] {reason}", delete_message_days=delete_days)
+        await interaction.guild.unban(member, reason="Softban — automatic unban")
+        log_sanction(interaction.guild_id, member.id, "softban", reason, interaction.user.id)
+        embed = discord.Embed(title="🧹 Member Softbanned", color=0xff6600)
+        embed.add_field(name="User", value=f"**{member}**", inline=True)
+        embed.add_field(name="By", value=f"**{interaction.user}**", inline=True)
+        embed.add_field(name="Messages deleted", value=f"Last {delete_days} day(s)", inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        embed = discord.Embed(description=f"❌ I can't softban this member: {e}", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="purgeuser", description="Delete all stored data (warnings, sanctions, notes) for a member on this server")
+@app_commands.describe(user_id="The Discord user ID whose data to erase")
+@has_admin()
+async def purgeuser(interaction: discord.Interaction, user_id: str):
+    guild_id = str(interaction.guild_id)
+    warns_col.delete_many({"guild_id": guild_id, "user_id": user_id})
+    sanctions_col.delete_many({"guild_id": guild_id, "user_id": user_id})
+    notes_col.delete_many({"guild_id": guild_id, "user_id": user_id})
+    embed = discord.Embed(
+        description=f"🗑️ All stored data (warnings, sanctions, notes) for user ID `{user_id}` has been erased for this server.",
+        color=0x00cc00,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # /banlist
 @bot.tree.command(name="banlist", description="List all banned members")
@@ -873,6 +1027,95 @@ async def serverinfo(interaction: discord.Interaction):
     embed.add_field(name="Boosts", value=f"⚡ {guild.premium_subscription_count} (Level {guild.premium_tier})", inline=True)
     embed.add_field(name="Verification Level", value=str(guild.verification_level).title(), inline=True)
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="help", description="List all available commands")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(title="📖 Jello Bello — Commands", color=0x3399ff)
+    embed.add_field(
+        name="🛡️ Moderation",
+        value="`/ban` `/unban` `/kick` `/mute` `/unmute` `/tempban` `/softban`\n"
+              "`/warn` `/unwarn` `/warnings` `/warnlist` `/note` `/notes` `/history` `/banlist` `/mutelist` `/clear`",
+        inline=False,
+    )
+    embed.add_field(
+        name="🔒 Channels & Roles",
+        value="`/lock` `/unlock` `/vlock` `/vunlock` `/lockedchannels`\n"
+              "`/roleadd` `/roleremove` `/reactionrole` `/slowmode`\n"
+              "`/nickname` `/groupnickname`",
+        inline=False,
+    )
+    embed.add_field(
+        name="📋 Applications & Utilities",
+        value="`/apply` `/userinfo` `/serverinfo` `/broadcast` `/poll` `/botinfo` `/ping` `/help`",
+        inline=False,
+    )
+    embed.add_field(
+        name="🎵 Music",
+        value="`/play` `/search` `/pause` `/resume` `/skip` `/stop` `/queue` `/volume`",
+        inline=False,
+    )
+    embed.add_field(
+        name="⚙️ Server Config",
+        value="`/config logs` `/config autorole` `/config apikey` `/config view`\n"
+              "`/config allow` `/config disallow` `/purgeuser` — owner/admin only\n"
+              "`/botlock` `/botunlock` — server owner only",
+        inline=False,
+    )
+    embed.set_footer(text="Full documentation on GitHub")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="ping", description="Check the bot's latency")
+async def ping(interaction: discord.Interaction):
+    latency_ms = round(bot.latency * 1000)
+    embed = discord.Embed(description=f"🏓 Pong! `{latency_ms}ms`", color=0x00cc00)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="botinfo", description="Show information about the bot")
+async def botinfo(interaction: discord.Interaction):
+    uptime_seconds = int(time.time() - bot.start_time)
+    days, rem = divmod(uptime_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    uptime_str = f"{days}d {hours}h {minutes}m"
+    embed = discord.Embed(title="🤖 Jello Bello", color=0x3399ff)
+    if bot.user.avatar:
+        embed.set_thumbnail(url=bot.user.avatar.url)
+    embed.add_field(name="Servers", value=str(len(bot.guilds)), inline=True)
+    embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    embed.add_field(name="Uptime", value=uptime_str, inline=True)
+    embed.add_field(name="Library", value=f"discord.py {discord.__version__}", inline=True)
+    embed.set_footer(text="github.com/digravinaloris/dc-bot")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="poll", description="Create a quick poll")
+@app_commands.describe(
+    question="The poll question",
+    option1="First option (leave empty for a simple 👍/👎 poll)",
+    option2="Second option",
+    option3="Third option",
+    option4="Fourth option",
+)
+async def poll(interaction: discord.Interaction, question: str, option1: str = None, option2: str = None, option3: str = None, option4: str = None):
+    options = [o for o in [option1, option2, option3, option4] if o]
+    embed = discord.Embed(title=f"📊 {question}", color=0x3399ff)
+    embed.set_footer(text=f"Poll started by {interaction.user}")
+    if options:
+        number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+        embed.description = "\n".join(f"{number_emojis[i]} {opt}" for i, opt in enumerate(options))
+        await interaction.response.send_message(embed=embed)
+        message = await interaction.original_response()
+        for i in range(len(options)):
+            await message.add_reaction(number_emojis[i])
+    else:
+        await interaction.response.send_message(embed=embed)
+        message = await interaction.original_response()
+        await message.add_reaction("👍")
+        await message.add_reaction("👎")
+
 
 
 @bot.tree.command(name="tempban", description="Temporarily ban a member")
