@@ -4,6 +4,8 @@ A full-featured Discord moderation & utility bot — auto-moderation, anti-raid 
 
 Built with Python (discord.py) + Flask, backed by MongoDB Atlas, hosted on Render.
 
+**[➕ Invite Jello Bello to your server](https://discord.com/api/oauth2/authorize?client_id=1510263826455466004&permissions=1099917519958&scope=bot%20applications.commands)**
+
 ---
 
 ## Features
@@ -22,6 +24,20 @@ Jello Bello works across multiple servers — each server has its own independen
 
 ---
 
+## Getting Started
+
+1. [Invite the bot](https://discord.com/api/oauth2/authorize?client_id=1510263826455466004&permissions=1099917519958&scope=bot%20applications.commands) to your server.
+2. You (the server owner) get a DM with a quick setup summary. As Administrator, run:
+   - `/config logs <channel>` — where moderation logs get posted
+   - `/config autorole <role>` — role given automatically to new members (optional)
+3. As server **owner**, decide who's allowed to do what:
+   - `/config allow <command> <role>` — let a specific role use a specific command (e.g. `/config allow ban @Moderator`)
+   - Skip this if the default Discord permissions (Ban Members, Kick Members, etc.) already work for you
+4. (Optional) Run `/config apikey` to get an API key for the [companion Android app](#companion-android-app).
+5. Run `/help` any time to see the full command list in Discord.
+
+---
+
 ## Commands
 
 ### Moderation
@@ -29,12 +45,15 @@ Jello Bello works across multiple servers — each server has its own independen
 |---|---|
 | `/ban` `/unban` | Ban / unban a member |
 | `/kick` | Kick a member |
+| `/softban` | Kick a member and delete their recent messages |
 | `/mute` `/unmute` | Timeout a member |
 | `/tempban <duration>` | Temporary ban (`30m`, `2h`, `1d`, `1w`), lifted automatically |
 | `/warn` `/unwarn` `/warnings` `/warnlist` | Manage warnings |
+| `/note` `/notes` | Add / view internal staff notes on a member (not visible to them) |
 | `/banlist` `/mutelist` | List active bans / mutes |
 | `/history` | Full sanction history for a member |
 | `/clear` | Bulk-delete messages, with user/role/bot filters |
+| `/purgeuser <user_id>` | Erase all stored data (warnings, sanctions, notes) for a member on this server — Administrator only |
 
 ### Channels & Roles
 | Command | Description |
@@ -42,8 +61,11 @@ Jello Bello works across multiple servers — each server has its own independen
 | `/lock` `/unlock` | Lock / unlock a text channel |
 | `/vlock` `/vunlock` | Lock / unlock a voice channel |
 | `/lockedchannels` | List currently locked channels |
+| `/slowmode <channel> <seconds>` | Set or disable slowmode on a channel |
 | `/roleadd` `/roleremove` | Add / remove a role from a member |
 | `/reactionrole` | Create a reaction-role message |
+| `/nickname <member>` | Change a member's nickname |
+| `/groupnickname <role> <prefix>` | Add or remove a prefix on the nickname of every member with a role |
 
 ### Applications & Utilities
 | Command | Description |
@@ -51,6 +73,10 @@ Jello Bello works across multiple servers — each server has its own independen
 | `/apply <role>` | Apply for a role via a short form; the server owner accepts or refuses |
 | `/userinfo` `/serverinfo` | Member / server information |
 | `/broadcast` | Send an announcement as the bot |
+| `/poll <question>` | Create a quick poll (up to 4 options, or a simple 👍/👎) |
+| `/help` | List all available commands |
+| `/ping` | Check the bot's latency |
+| `/botinfo` | Bot stats: servers, uptime, latency |
 
 ### Music
 | Command | Description |
@@ -95,6 +121,24 @@ By default, commands fall back to their standard Discord permission (e.g. Ban Me
 ## Companion Android App
 
 Built with Kotlin + Jetpack Compose, connecting to the bot's REST API to let server admins moderate, check stats, and manage configuration from their phone. Each server gets its own API key via `/config apikey`.
+
+---
+
+## Known Issues
+
+- **`/play` crashes (FFmpeg segfault)** — music playback can currently crash with a segfault on Render's infrastructure under some conditions. Under active investigation; if `/play` stops responding, `/skip` or `/stop` and try again.
+
+---
+
+## Support
+
+Found a bug or have a feature request? Open an [issue on GitHub](https://github.com/digravinaloris/dc-bot/issues).
+
+---
+
+## License
+
+All rights reserved. This project's source code is not currently licensed for reuse or redistribution.
 
 ---
 
