@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import os
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 from threading import Thread
 import asyncio
 import datetime
@@ -2112,6 +2112,10 @@ def require_api_key(f):
     Deux clés sont acceptées :
     - la clé "maîtresse" définie dans la variable d'env API_KEY sur Render (accès à tous les serveurs)
     - la clé propre à UN serveur, générée via /config apikey (accès à ce serveur uniquement)
+
+    Pose g.auth_guild_id = None si la clé maîtresse est utilisée (accès total),
+    ou l'ID du serveur si une clé propre à un serveur est utilisée (accès limité à ce serveur).
+    Utile pour les routes sans guild_id dans l'URL (/api/health, /api/guilds).
     """
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -2119,12 +2123,22 @@ def require_api_key(f):
         if not key:
             return jsonify({"error": "Missing X-API-Key header"}), 401
         if API_KEY and key == API_KEY:
+            g.auth_guild_id = None
             return f(*args, **kwargs)
         guild_id = kwargs.get("guild_id")
         if guild_id:
             cfg = get_config(guild_id)
             if cfg.get("api_key") and key == cfg["api_key"]:
+                g.auth_guild_id = str(guild_id)
                 return f(*args, **kwargs)
+        elif bot.is_ready():
+            # Pas de guild_id dans l'URL (ex: /api/health, /api/guilds) : on cherche
+            # à quel serveur cette clé appartient parmi tous les serveurs du bot.
+            for candidate_guild in bot.guilds:
+                cfg = get_config(candidate_guild.id)
+                if cfg.get("api_key") and key == cfg["api_key"]:
+                    g.auth_guild_id = str(candidate_guild.id)
+                    return f(*args, **kwargs)
         return jsonify({"error": "Unauthorized"}), 401
     return wrapper
 
@@ -2199,9 +2213,16 @@ def home():
 @api.route('/api/health', methods=['GET'])
 @require_api_key
 def health():
+    if g.auth_guild_id:
+        # Clé propre à un serveur : "locked" reflète uniquement ce serveur, pas les autres.
+        return jsonify({
+            "online": bot.is_ready(),
+            "locked": int(g.auth_guild_id) in bot.locked_guilds,
+            "guild_count": 1
+        })
     return jsonify({
         "online": bot.is_ready(),
-        "locked_guilds": [str(g) for g in bot.locked_guilds],
+        "locked": len(bot.locked_guilds) > 0,
         "guild_count": len(bot.guilds) if bot.is_ready() else 0
     })
 
@@ -2210,7 +2231,13 @@ def health():
 def list_guilds():
     if not bot.is_ready():
         return jsonify({"error": "Bot not ready"}), 503
-    guilds = [{"id": str(g.id), "name": g.name, "member_count": g.member_count} for g in bot.guilds]
+    if g.auth_guild_id:
+        # Clé propre à un serveur : ne renvoie que CE serveur, jamais les autres.
+        guild = bot.get_guild(int(g.auth_guild_id))
+        if not guild:
+            return jsonify([])
+        return jsonify([{"id": str(guild.id), "name": guild.name, "member_count": guild.member_count}])
+    guilds = [{"id": str(gd.id), "name": gd.name, "member_count": gd.member_count} for gd in bot.guilds]
     return jsonify(guilds)
 
 @api.route('/api/guilds/<guild_id>/stats', methods=['GET'])
