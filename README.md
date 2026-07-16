@@ -144,5 +144,5 @@ All rights reserved. This project's source code is not currently licensed for re
 
 ## Legal
 
-- [Terms of Service](https://gist.github.com/digravinaloris/48698cf1c84609c688f7ba86c3a2b958)
-- [Privacy Policy](https://gist.github.com/digravinaloris/17bbe8e1a5c8db6a299331a430a45a42)
+- [Terms of Service](https://github.com/digravinaloris/Jello-Bello-discord-bot/blob/main/TERMS.md)
+- [Privacy Policy](https://github.com/digravinaloris/Jello-Bello-discord-bot/blob/main/PRIVACY.md)
