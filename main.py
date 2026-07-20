@@ -636,7 +636,7 @@ async def nickname(interaction: discord.Interaction, member: discord.Member, nic
 
 
 @bot.tree.command(name="groupnickname", description="Add or remove a prefix on the nickname of every member with a role")
-@app_commands.describe(role="The role to target", prefix="The prefix to add (e.g. '[EVENT] ')", remove="Remove this prefix instead of adding it")
+@app_commands.describe(role="The role to target", prefix="The prefix to add (e.g. '[EVENT]', a space is added automatically)", remove="Remove this prefix instead of adding it")
 async def groupnickname(interaction: discord.Interaction, role: discord.Role, prefix: str, remove: bool = False):
     if not await check_access(interaction, "groupnickname", "manage_nicknames"): return
     if role >= interaction.guild.me.top_role:
@@ -650,15 +650,16 @@ async def groupnickname(interaction: discord.Interaction, role: discord.Role, pr
             skipped += 1
             continue
         current = member.nick or member.name
+        full_prefix = f"{prefix} "
         try:
             if remove:
-                if current.startswith(prefix):
-                    new_nick = current[len(prefix):] or None
+                if current.startswith(full_prefix):
+                    new_nick = current[len(full_prefix):] or None
                     await member.edit(nick=new_nick)
                     updated += 1
             else:
-                if not current.startswith(prefix):
-                    new_nick = (prefix + current)[:32]
+                if not current.startswith(full_prefix):
+                    new_nick = (full_prefix + current)[:32]
                     await member.edit(nick=new_nick)
                     updated += 1
         except Exception:
